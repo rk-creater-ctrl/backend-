@@ -1,37 +1,47 @@
 // backend/routes/enrollment.js
-const express    = require("express");
-const router     = express.Router();
-const Enrollment = require("../models/Enrollment");
-const Course     = require("../models/Course");
+const express = require("express");
+const router = express.Router();
+const { supabase } = require("../supabaseClient");
 const { onlyAdmin } = require("../middleware/authRole");
-
 
 // Student creates enrollment (offline OR online placeholder)
 router.post("/", async (req, res) => {
   try {
     const { studentId, courseId, mode, paymentType, offlineDetails } = req.body;
 
-    const course = await Course.findById(courseId);
+    const { data: course, error: cErr } = await supabase
+      .from("courses")
+      .select("id,price")
+      .eq("id", courseId)
+      .single();
+
+    if (cErr) throw cErr;
     if (!course) return res.status(404).send("Course not found");
 
-    const enrollment = new Enrollment({
-      studentId,
-      courseId,
-      mode,
-      paymentType,
-      paymentStatus: "unpaid",
-      amount: course.price || 0,
-      offlineDetails: mode === "offline" ? offlineDetails : undefined,
-    });
+    const amount = Number(course.price || 0);
 
-    await enrollment.save();
+    const { data: enrollment, error: eErr } = await supabase
+      .from("enrollments")
+      .insert({
+        student_id: studentId,
+        course_id: courseId,
+        mode,
+        payment_type: paymentType,
+        payment_status: "unpaid",
+        status: "pending",
+        amount,
+        offline_details: mode === "offline" ? offlineDetails : null,
+      })
+      .select(
+        "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at"
+      )
+      .single();
 
-    // if paymentType === "online", here you will:
-    // 1) create Razorpay/Stripe order,
-    // 2) send order details back to frontend.
+    if (eErr) throw eErr;
+
     res.json({
       message: "Enrollment request created",
-      enrollmentId: enrollment._id,
+      enrollmentId: enrollment.id,
     });
   } catch (e) {
     res.status(400).send("Error: " + e.message);
@@ -40,42 +50,83 @@ router.post("/", async (req, res) => {
 
 // ADMIN: list enrollments
 router.get("/all", onlyAdmin, async (req, res) => {
-  const enrollments = await Enrollment.find()
-    .populate("studentId", "fullName username")
-    .populate("courseId", "title");
-  res.json(enrollments);
+  try {
+    const { data, error } = await supabase
+      .from("enrollments")
+      .select(
+        "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at"
+      )
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    // Map to old-ish nested populate shape: { studentId: {..}, courseId: {title,..} }
+    res.json(
+      (data || []).map((row) => ({
+        _id: row.id,
+        studentId: row.users || row.users?.[0] || row.student_id,
+        courseId: row.courses || row.courses?.[0] || row.course_id,
+        mode: row.mode,
+        paymentType: row.payment_type,
+        paymentStatus: row.payment_status,
+        status: row.status,
+        amount: row.amount,
+        offlineDetails: row.offline_details,
+        createdAt: row.created_at,
+      }))
+    );
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Failed to load enrollments");
+  }
 });
 
 // ADMIN: mark offline as paid
 router.post("/mark-paid/:id", onlyAdmin, async (req, res) => {
-  const id = req.params.id;
-  const enrollment = await Enrollment.findById(id);
-  if (!enrollment) return res.status(404).send("Enrollment not found");
+  try {
+    const { error } = await supabase
+      .from("enrollments")
+      .update({ payment_status: "paid", status: "active" })
+      .eq("id", req.params.id);
 
-  enrollment.paymentStatus = "paid";
-  enrollment.status        = "active";
-  await enrollment.save();
-  res.send("Enrollment marked as paid");
+    if (error) throw error;
+    res.send("Enrollment marked as paid");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Failed to update enrollment");
+  }
 });
 
 // ADMIN: mark as unpaid again
 router.post("/mark-unpaid/:id", onlyAdmin, async (req, res) => {
-  const id = req.params.id;
-  const enrollment = await Enrollment.findById(id);
-  if (!enrollment) return res.status(404).send("Enrollment not found");
+  try {
+    const { error } = await supabase
+      .from("enrollments")
+      .update({ payment_status: "unpaid", status: "pending" })
+      .eq("id", req.params.id);
 
-  enrollment.paymentStatus = "unpaid";
-  enrollment.status        = "pending";
-  await enrollment.save();
-  res.send("Enrollment marked as unpaid");
+    if (error) throw error;
+    res.send("Enrollment marked as unpaid");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Failed to update enrollment");
+  }
 });
 
 // ADMIN: delete enrollment
 router.delete("/:id", onlyAdmin, async (req, res) => {
-  const id = req.params.id;
-  const enrollment = await Enrollment.findByIdAndDelete(id);
-  if (!enrollment) return res.status(404).send("Enrollment not found");
-  res.send("Enrollment deleted");
+  try {
+    const { error } = await supabase
+      .from("enrollments")
+      .delete()
+      .eq("id", req.params.id);
+
+    if (error) throw error;
+    res.send("Enrollment deleted");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Failed to delete enrollment");
+  }
 });
 
 // STUDENT: my enrollments / fees
@@ -83,16 +134,35 @@ router.get("/my-fees/:studentId", async (req, res) => {
   try {
     const { studentId } = req.params;
 
-    const enrollments = await Enrollment.find({ studentId })
-      .populate("courseId", "title price") // so app can show title & price
-      .lean();
+    const { data, error } = await supabase
+      .from("enrollments")
+      .select(
+        "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at,courses!enrollments_course_id_fkey(title,price,description,cover_image_url,category)"
+      )
+      .eq("student_id", studentId)
+      .order("created_at", { ascending: false });
 
-    return res.json(enrollments); // plain array
+    if (error) throw error;
+
+    res.json(
+      (data || []).map((row) => ({
+        _id: row.id,
+        studentId: row.student_id,
+        courseId: row.courses,
+        mode: row.mode,
+        paymentType: row.payment_type,
+        paymentStatus: row.payment_status,
+        status: row.status,
+        amount: row.amount,
+        offlineDetails: row.offline_details,
+        createdAt: row.created_at,
+      }))
+    );
   } catch (err) {
     console.error("MY FEES ERROR:", err.message);
     res.status(500).json({ message: "Server error" });
   }
 });
 
-
 module.exports = router;
+
