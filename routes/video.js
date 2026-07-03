@@ -1,11 +1,12 @@
 // backend/routes/video.js
 const express = require("express");
 const router = express.Router();
-const Video = require("../models/Video");
+const { supabase } = require("../supabaseClient");
 const { onlyAdmin } = require("../middleware/authRole");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+
 
 // -----------------
 // Multer setup for video files (under /uploads/videos)
@@ -35,13 +36,70 @@ const upload = multer({
   },
 });
 
+function removeLocalVideoFile(fileUrl) {
+  if (!fileUrl) return;
+
+  try {
+    const parsed = new URL(fileUrl, "http://local");
+    const relativePath = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+
+    if (!relativePath.startsWith("uploads/videos/")) return;
+
+    const resolvedPath = path.resolve(__dirname, "..", relativePath);
+    const resolvedUploadDir = path.resolve(uploadDir);
+
+    if (!resolvedPath.startsWith(resolvedUploadDir + path.sep)) return;
+
+    if (fs.existsSync(resolvedPath)) {
+      fs.unlinkSync(resolvedPath);
+    }
+  } catch (err) {
+    console.error("Delete local video file error:", err.message);
+  }
+}
+
+async function deleteVideoById(req, res) {
+  try {
+    const { data: video, error: selError } = await supabase
+      .from("videos")
+      .select("id,type,file_url")
+      .eq("id", req.params.id)
+      .maybeSingle();
+
+    if (selError) throw selError;
+    if (!video) return res.status(404).json({ error: "Video not found" });
+
+    if (video.type === "file") {
+      removeLocalVideoFile(video.file_url);
+    }
+
+    const { error: delError } = await supabase
+      .from("videos")
+      .delete()
+      .eq("id", req.params.id);
+
+    if (delError) throw delError;
+
+    return res.json({ success: true, deletedId: String(video.id) });
+  } catch (err) {
+    console.error("Delete video error:", err);
+    return res.status(500).json({ error: "Failed to delete video" });
+  }
+}
+
 // -----------------
 // ADMIN: list all videos
 // -----------------
 router.get("/all", onlyAdmin, async (req, res) => {
   try {
-    const videos = await Video.find().sort({ order: 1, createdAt: -1 });
-    return res.json(videos);
+    const { data, error } = await supabase
+      .from("videos")
+      .select("id,title,type,youtube_video_id,file_url,order,created_at")
+      .order("order", { ascending: true })
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+    return res.json(data || []);
   } catch (err) {
     console.error("List videos error:", err);
     return res.status(500).json({ error: "Failed to list videos" });
@@ -55,20 +113,22 @@ router.post("/all", onlyAdmin, async (req, res) => {
   try {
     const { title, youtubeVideoId, order } = req.body;
     if (!title || !youtubeVideoId) {
-      return res
-        .status(400)
-        .json({ error: "title and youtubeVideoId required" });
+      return res.status(400).json({ error: "title and youtubeVideoId required" });
     }
 
-    const video = new Video({
-      title,
-      type: "youtube",
-      youtubeVideoId,
-      order: typeof order === "number" ? order : Number(order) || 0,
-    });
+    const { data, error } = await supabase
+      .from("videos")
+      .insert({
+        title,
+        type: "youtube",
+        youtube_video_id: youtubeVideoId,
+        order: typeof order === "number" ? order : Number(order) || 0,
+      })
+      .select("id,title,type,youtube_video_id,file_url,order,created_at")
+      .single();
 
-    await video.save();
-    return res.json({ success: true, video });
+    if (error) throw error;
+    return res.json({ success: true, video: data });
   } catch (err) {
     console.error("Create video error:", err);
     return res.status(500).json({ error: "Failed to create video" });
@@ -93,30 +153,26 @@ router.post(
         return res.status(400).json({ error: "video file is required" });
       }
 
-      // e.g. /uploads/videos/filename.mp4
       const relativePath = path.join("uploads", "videos", req.file.filename)
         .replace(/\\/g, "/");
 
       const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
       const fileUrl = `${baseUrl}/${relativePath}`;
 
-      console.log("VIDEO UPLOAD:", {
-        file: req.file,
-        body: req.body,
-        relativePath,
-        fileUrl,
-      });
+      const { data, error } = await supabase
+        .from("videos")
+        .insert({
+          title,
+          type: "file",
+          file_url: fileUrl,
+          order: order ? Number(order) : 0,
+        })
+        .select("id,title,type,youtube_video_id,file_url,order,created_at")
+        .single();
 
-      const video = new Video({
-        title,
-        type: "file",
-        fileUrl,
-        order: order ? Number(order) : 0,
-      });
+      if (error) throw error;
 
-      await video.save();
-
-      return res.json({ success: true, video });
+      return res.json({ success: true, video: data });
     } catch (err) {
       console.error("Upload video error:", err);
       return res.status(500).json({ error: "Failed to upload video" });
@@ -125,18 +181,33 @@ router.post(
 );
 
 // -----------------
+// ADMIN: delete video
+// Supports both paths so older frontend calls and clearer admin calls work.
+// -----------------
+router.delete("/all/:id", onlyAdmin, deleteVideoById);
+router.delete("/:id", onlyAdmin, deleteVideoById);
+
+// -----------------
 // STUDENT: public list
 // -----------------
 router.get("/public", async (req, res) => {
   try {
-    const videos = await Video.find().sort({ order: 1, createdAt: -1 });
-    const mapped = videos.map((v) => ({
-      id: v._id,
+    const { data, error } = await supabase
+      .from("videos")
+      .select("id,title,type,youtube_video_id,file_url")
+      .order("order", { ascending: true })
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    const mapped = (data || []).map((v) => ({
+      id: v.id,
       title: v.title,
       type: v.type,
-      youtubeVideoId: v.youtubeVideoId,
-      fileUrl: v.fileUrl,
+      youtubeVideoId: v.youtube_video_id,
+      fileUrl: v.file_url,
     }));
+
     return res.json(mapped);
   } catch (err) {
     console.error("Public videos error:", err);

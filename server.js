@@ -2,9 +2,13 @@
 const express  = require("express");
 const http     = require("http");
 const cors     = require("cors");
-const mongoose = require("mongoose");
 const socketIO = require("socket.io");
-require("dotenv").config();
+const jwt      = require("jsonwebtoken");
+require("dotenv").config({ path: require("path").join(__dirname, ".env") });
+
+// Supabase client (server-side)
+require("./supabaseClient");
+
 
 const path             = require("path");
 const uploadRoutes     = require("./routes/upload");
@@ -17,6 +21,8 @@ const userRoutes       = require("./routes/user");
 const paymentRoutes = require("./routes/payment");
 const liveClassRoutes = require("./routes/liveClassRoutes");
 const videoRoutes = require("./routes/video");
+const settingsRoutes = require("./routes/settings");
+const progressRoutes = require("./routes/progress");
 
 const app    = express();
 const server = http.createServer(app);
@@ -26,8 +32,34 @@ const io     = socketIO(server, {
     methods: ["GET", "POST"]
   }
 });
+const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_key";
+const INTERNAL_LIVE_ROOM_PREFIX = "internal-live:";
+let internalLiveBroadcasterId = null;
 
-app.use(cors());
+function verifySocketToken(token) {
+  if (!token) return null;
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+
+const allowedOrigins = (process.env.FRONTEND_URLS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin(origin, callback) {
+    // Requests without an Origin include mobile apps and health checks.
+    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error("Origin is not allowed by CORS"));
+  },
+  credentials: true,
+}));
 app.use(express.json());
 app.use(attachUser);
 
@@ -42,10 +74,16 @@ app.use("/user",       userRoutes);
 app.use("/payment", paymentRoutes);
 app.use("/live-class", liveClassRoutes);
 app.use("/video", videoRoutes);
+app.use("/settings", settingsRoutes);
+app.use("/progress", progressRoutes);
 
 
 app.get("/", (req, res) => {
-  res.send("TechJaguar API running");
+  res.send("SR EduNova API running");
+});
+
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok" });
 });
 
 // ... rest of your server.js unchanged
@@ -73,19 +111,118 @@ io.on("connection", (socket) => {
     socket.to(roomCode).emit("ice-candidate", { candidate, from });
   });
 
+  socket.on("internal-live:broadcaster-start", ({ token, roomCode }) => {
+    const payload = verifySocketToken(token);
+    if (!payload || payload.type !== "admin" || !roomCode) {
+      socket.emit("internal-live:error", { message: "Admin live access denied" });
+      return;
+    }
+
+    internalLiveBroadcasterId = socket.id;
+    socket.data.internalLiveRole = "broadcaster";
+    socket.data.internalLiveRoomCode = roomCode;
+    socket.data.internalLiveName = "Teacher";
+    socket.join(`${INTERNAL_LIVE_ROOM_PREFIX}${roomCode}`);
+    socket.emit("internal-live:broadcaster-ready", { roomCode });
+    socket
+      .to(`${INTERNAL_LIVE_ROOM_PREFIX}${roomCode}`)
+      .emit("internal-live:broadcaster-online");
+  });
+
+  socket.on("internal-live:viewer-join", ({ token }) => {
+    const payload = verifySocketToken(token);
+    if (!payload || payload.type !== "internal_live_viewer" || !payload.roomCode) {
+      socket.emit("internal-live:error", { message: "Student live access denied" });
+      return;
+    }
+
+    socket.data.internalLiveRole = "viewer";
+    socket.data.internalLiveRoomCode = payload.roomCode;
+    socket.data.internalLiveName = payload.studentName || "Student";
+    socket.join(`${INTERNAL_LIVE_ROOM_PREFIX}${payload.roomCode}`);
+
+    if (internalLiveBroadcasterId) {
+      io.to(internalLiveBroadcasterId).emit("internal-live:viewer-joined", {
+        viewerId: socket.id,
+        name: socket.data.internalLiveName,
+      });
+    } else {
+      socket.emit("internal-live:error", { message: "Teacher has not started streaming yet" });
+    }
+  });
+
+  socket.on("internal-live:offer", ({ to, offer }) => {
+    if (!to || !offer) return;
+    io.to(to).emit("internal-live:offer", { from: socket.id, offer });
+  });
+
+  socket.on("internal-live:answer", ({ to, answer }) => {
+    if (!to || !answer) return;
+    io.to(to).emit("internal-live:answer", { from: socket.id, answer });
+  });
+
+  socket.on("internal-live:candidate", ({ to, candidate }) => {
+    if (!to || !candidate) return;
+    io.to(to).emit("internal-live:candidate", { from: socket.id, candidate });
+  });
+
+  socket.on("internal-live:chat-message", ({ text, name }) => {
+    const roomCode = socket.data.internalLiveRoomCode;
+    if (!roomCode || !text) return;
+
+    const message = {
+      id: `${Date.now()}_${socket.id}`,
+      role: socket.data.internalLiveRole || "viewer",
+      name: name || socket.data.internalLiveName || "Class",
+      text: String(text).slice(0, 500),
+      createdAt: new Date().toISOString(),
+    };
+
+    io.to(`${INTERNAL_LIVE_ROOM_PREFIX}${roomCode}`).emit(
+      "internal-live:chat-message",
+      message
+    );
+  });
+
+  socket.on("internal-live:raise-hand", ({ name }) => {
+    const roomCode = socket.data.internalLiveRoomCode;
+    if (!roomCode) return;
+
+    const message = {
+      viewerId: socket.id,
+      name: name || socket.data.internalLiveName || "Student",
+      createdAt: new Date().toISOString(),
+    };
+
+    io.to(`${INTERNAL_LIVE_ROOM_PREFIX}${roomCode}`).emit(
+      "internal-live:hand-raised",
+      message
+    );
+  });
+
   socket.on("disconnect", () => {
+    if (socket.id === internalLiveBroadcasterId) {
+      internalLiveBroadcasterId = null;
+      const roomCode = socket.data.internalLiveRoomCode;
+      if (roomCode) {
+        socket
+          .to(`${INTERNAL_LIVE_ROOM_PREFIX}${roomCode}`)
+          .emit("internal-live:broadcaster-offline");
+      }
+    } else if (socket.data.internalLiveRole === "viewer" && internalLiveBroadcasterId) {
+      io.to(internalLiveBroadcasterId).emit("internal-live:viewer-left", {
+        viewerId: socket.id,
+        name: socket.data.internalLiveName,
+      });
+    }
+
     console.log("Socket disconnected", socket.id);
   });
 });
 
-/* ---------- MongoDB ---------- */
-const MONGO_URL =
-  process.env.MONGO_URL || "mongodb://127.0.0.1:27017/techjaguar";
-
-mongoose
-  .connect(MONGO_URL)
-  .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.log("MongoDB error:", err.message));
+/* ---------- Database: Supabase ---------- */
+// Supabase connectivity is handled by `backend/supabaseClient.js`.
+// This file only starts the HTTP + Socket.io servers.
 
 /* ---------- Start server ---------- */
 const PORT = process.env.PORT || 3000;

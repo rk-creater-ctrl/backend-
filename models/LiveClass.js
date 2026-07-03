@@ -15,6 +15,16 @@ const LiveClassSchema = new mongoose.Schema(
 
     // YouTube id (kept hidden from students)
     youtubeVideoId: { type: String },
+
+    activeMode: {
+      type: String,
+      enum: ["youtube", "internal"],
+      default: "internal",
+    },
+    internalLiveActive: { type: Boolean, default: false },
+    internalRoomCode: { type: String },
+    internalLiveStartedAt: { type: Date },
+    internalLiveEndedAt: { type: Date },
   },
   { timestamps: true }
 );

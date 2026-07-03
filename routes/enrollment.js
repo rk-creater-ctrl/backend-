@@ -137,7 +137,7 @@ router.get("/my-fees/:studentId", async (req, res) => {
     const { data, error } = await supabase
       .from("enrollments")
       .select(
-        "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at,courses!enrollments_course_id_fkey(title,price,description,cover_image_url,category)"
+        "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at,courses(title,price,description,cover_image_url,category)"
       )
       .eq("student_id", studentId)
       .order("created_at", { ascending: false });
