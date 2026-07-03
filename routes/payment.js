@@ -4,14 +4,27 @@ const Razorpay = require("razorpay");
 
 const router = express.Router();
 
-const razor = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
+const hasRazorpayConfig = Boolean(
+  process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET
+);
+
+// Keep the API available when online payments are not configured.
+const razor = hasRazorpayConfig
+  ? new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    })
+  : null;
 
 // Create Razorpay order
 router.post("/order", async (req, res) => {
   try {
+    if (!razor) {
+      return res.status(503).json({
+        message: "Online payments are not configured",
+      });
+    }
+
     const { amount, currency = "INR", receipt, notes } = req.body;
 
     if (!amount || amount <= 0) {
