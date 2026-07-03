@@ -45,15 +45,19 @@ function verifySocketToken(token) {
   }
 }
 
+function normalizeOrigin(value) {
+  return String(value || "").trim().replace(/\/$/, "").toLowerCase();
+}
+
 const allowedOrigins = (process.env.FRONTEND_URLS || "")
   .split(",")
-  .map((origin) => origin.trim())
+  .map(normalizeOrigin)
   .filter(Boolean);
 
 app.use(cors({
   origin(origin, callback) {
     // Requests without an Origin include mobile apps and health checks.
-    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(normalizeOrigin(origin))) {
       return callback(null, true);
     }
     return callback(new Error("Origin is not allowed by CORS"));
