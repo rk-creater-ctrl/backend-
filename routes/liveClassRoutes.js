@@ -1,9 +1,7 @@
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const router = express.Router();
-const LiveClass = require("../models/LiveClass");
-const Enrollment = require("../models/Enrollment");
-const User = require("../models/User");
+const { supabase } = require("../supabaseClient");
 const { onlyAdmin } = require("../middleware/authRole");
 
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_key";
@@ -31,11 +29,55 @@ function escapeHtml(value) {
 }
 
 async function studentHasLiveAccess(studentId) {
-  return Enrollment.findOne({
-    studentId,
-    paymentStatus: "paid",
-    status: "active",
-  });
+  const { data, error } = await supabase
+    .from("enrollments")
+    .select("id")
+    .eq("student_id", studentId)
+    .eq("payment_status", "paid")
+    .eq("status", "active")
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+function toLiveClass(row) {
+  if (!row) return null;
+  return {
+    _id: row.id,
+    key: row.key,
+    title: row.title,
+    status: row.status,
+    scheduledAt: row.scheduled_at,
+    youtubeVideoId: row.youtube_video_id,
+    activeMode: row.active_mode,
+    internalLiveActive: row.internal_live_active,
+    internalRoomCode: row.internal_room_code,
+    internalLiveStartedAt: row.internal_live_started_at,
+    internalLiveEndedAt: row.internal_live_ended_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function getGlobalLiveClass() {
+  const { data, error } = await supabase
+    .from("live_classes")
+    .select("*")
+    .eq("key", "global")
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function saveGlobalLiveClass(values) {
+  const { data, error } = await supabase
+    .from("live_classes")
+    .upsert({ key: "global", ...values }, { onConflict: "key" })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data;
 }
 
 // Admin: save heading + schedule for global live class
@@ -43,20 +85,12 @@ router.post("/admin/save", onlyAdmin, async (req, res) => {
   try {
     const { title, scheduledAt } = req.body;
 
-    let live = await LiveClass.findOne({ key: "global" });
-    if (!live) {
-      live = new LiveClass({
-        key: "global",
-        title: title || "Live class",
-        scheduledAt,
-      });
-    } else {
-      if (title) live.title = title;
-      if (scheduledAt) live.scheduledAt = scheduledAt;
-    }
-
-    await live.save();
-    res.json({ success: true, liveClass: live, iceServers: getIceServers() });
+    const existing = await getGlobalLiveClass();
+    const live = await saveGlobalLiveClass({
+      title: title || existing?.title || "Live class",
+      scheduled_at: scheduledAt || existing?.scheduled_at || null,
+    });
+    res.json({ success: true, liveClass: toLiveClass(live), iceServers: getIceServers() });
   } catch (err) {
     console.error("Error saving live class:", err);
     res.status(500).json({ error: "Failed to save live class" });
@@ -68,24 +102,17 @@ router.post("/admin/start-internal", onlyAdmin, async (req, res) => {
   try {
     const { title } = req.body;
 
-    let live = await LiveClass.findOne({ key: "global" });
-    if (!live) {
-      live = new LiveClass({
-        key: "global",
-        title: title || "Live class",
-      });
-    }
-
-    if (title) live.title = title;
-    live.status = "live";
-    live.activeMode = "internal";
-    live.internalLiveActive = true;
-    live.internalRoomCode = live.internalRoomCode || makeRoomCode();
-    live.internalLiveStartedAt = new Date();
-    live.internalLiveEndedAt = undefined;
-
-    await live.save();
-    res.json({ success: true, liveClass: live, iceServers: getIceServers() });
+    const existing = await getGlobalLiveClass();
+    const live = await saveGlobalLiveClass({
+      title: title || existing?.title || "Live class",
+      status: "live",
+      active_mode: "internal",
+      internal_live_active: true,
+      internal_room_code: existing?.internal_room_code || makeRoomCode(),
+      internal_live_started_at: new Date().toISOString(),
+      internal_live_ended_at: null,
+    });
+    res.json({ success: true, liveClass: toLiveClass(live), iceServers: getIceServers() });
   } catch (err) {
     console.error("Error starting internal live class:", err);
     res.status(500).json({ error: "Failed to start internal live class" });
@@ -95,15 +122,15 @@ router.post("/admin/start-internal", onlyAdmin, async (req, res) => {
 // Admin: end internal app-only live class
 router.post("/admin/end-internal", onlyAdmin, async (req, res) => {
   try {
-    const live = await LiveClass.findOne({ key: "global" });
-    if (!live) return res.status(404).json({ error: "Live class not found" });
-
-    live.internalLiveActive = false;
-    live.internalLiveEndedAt = new Date();
-    if (live.activeMode === "internal") live.status = "ended";
-
-    await live.save();
-    res.json({ success: true, liveClass: live });
+    const existing = await getGlobalLiveClass();
+    if (!existing) return res.status(404).json({ error: "Live class not found" });
+    const live = await saveGlobalLiveClass({
+      title: existing.title,
+      internal_live_active: false,
+      internal_live_ended_at: new Date().toISOString(),
+      status: existing.active_mode === "internal" ? "ended" : existing.status,
+    });
+    res.json({ success: true, liveClass: toLiveClass(live) });
   } catch (err) {
     console.error("Error ending internal live class:", err);
     res.status(500).json({ error: "Failed to end internal live class" });
@@ -118,7 +145,7 @@ router.get("/student/:studentId", async (req, res) => {
     const enroll = await studentHasLiveAccess(studentId);
     if (!enroll) return res.json({ hasAccess: false });
 
-    const live = await LiveClass.findOne({ key: "global" });
+    const live = await getGlobalLiveClass();
     if (!live) return res.json({ hasAccess: true, hasLive: false });
 
     res.json({
@@ -126,9 +153,9 @@ router.get("/student/:studentId", async (req, res) => {
       hasLive: true,
       title: live.title,
       status: live.status,
-      scheduledAt: live.scheduledAt,
-      activeMode: live.activeMode || "internal",
-      internalLiveActive: live.internalLiveActive === true,
+      scheduledAt: live.scheduled_at,
+      activeMode: live.active_mode || "internal",
+      internalLiveActive: live.internal_live_active === true,
     });
   } catch (err) {
     console.error("Error loading live class for student:", err);
@@ -145,25 +172,26 @@ router.post("/internal/viewer-token", async (req, res) => {
     const enroll = await studentHasLiveAccess(studentId);
     if (!enroll) return res.status(403).json({ error: "No access" });
 
-    const live = await LiveClass.findOne({
-      key: "global",
-      activeMode: "internal",
-      internalLiveActive: true,
-      status: "live",
-    });
+    const live = await getGlobalLiveClass();
 
-    if (!live || !live.internalRoomCode) {
+    if (!live || live.active_mode !== "internal" || !live.internal_live_active ||
+        live.status !== "live" || !live.internal_room_code) {
       return res.status(404).json({ error: "No internal live class" });
     }
 
-    const user = await User.findById(studentId).select("fullName username").lean();
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("full_name,username")
+      .eq("id", studentId)
+      .maybeSingle();
+    if (userError) throw userError;
 
     const token = jwt.sign(
       {
         type: "internal_live_viewer",
         studentId,
-        studentName: user?.fullName || user?.username || "Student",
-        roomCode: live.internalRoomCode,
+        studentName: user?.full_name || user?.username || "Student",
+        roomCode: live.internal_room_code,
       },
       JWT_SECRET,
       { expiresIn: "2h" }
@@ -190,15 +218,12 @@ router.get("/internal/viewer", async (req, res) => {
       return res.status(403).send("Invalid live class token");
     }
 
-    const live = await LiveClass.findOne({
-      key: "global",
-      activeMode: "internal",
-      internalLiveActive: true,
-      internalRoomCode: payload.roomCode,
-      status: "live",
-    }).lean();
+    const live = await getGlobalLiveClass();
 
-    if (!live) return res.status(404).send("Live class is not active");
+    if (!live || live.active_mode !== "internal" || !live.internal_live_active ||
+        live.internal_room_code !== payload.roomCode || live.status !== "live") {
+      return res.status(404).send("Live class is not active");
+    }
 
     const title = escapeHtml(live.title || "Live class");
     const safeToken = JSON.stringify(token);
