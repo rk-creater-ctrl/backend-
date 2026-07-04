@@ -32,6 +32,8 @@ const io     = socketIO(server, {
     methods: ["GET", "POST"]
   }
 });
+app.set("trust proxy", 1);
+app.set("io", io);
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_key";
 const INTERNAL_LIVE_ROOM_PREFIX = "internal-live:";
 let internalLiveBroadcasterId = null;

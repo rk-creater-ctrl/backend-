@@ -4,6 +4,19 @@ const router = express.Router();
 const { supabase } = require("../supabaseClient");
 const { onlyAdmin } = require("../middleware/authRole");
 
+const enrollmentSelect =
+  "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at,users(full_name,username),courses(title)";
+
+function emitEnrollmentChange(req, action, enrollment) {
+  req.app.get("io")?.emit("enrollment:changed", { action, enrollment });
+}
+
+function enrollmentError(res, message, err) {
+  console.error(message, err);
+  const detail = err?.message || message;
+  res.status(500).json({ message, detail });
+}
+
 // Student creates enrollment (offline OR online placeholder)
 router.post("/", async (req, res) => {
   try {
@@ -43,6 +56,7 @@ router.post("/", async (req, res) => {
       message: "Enrollment request created",
       enrollmentId: enrollment.id,
     });
+    emitEnrollmentChange(req, "created", { _id: enrollment.id });
   } catch (e) {
     res.status(400).send("Error: " + e.message);
   }
@@ -53,9 +67,7 @@ router.get("/all", onlyAdmin, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("enrollments")
-      .select(
-        "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at"
-      )
+      .select(enrollmentSelect)
       .order("created_at", { ascending: false });
 
     if (error) throw error;
@@ -64,8 +76,12 @@ router.get("/all", onlyAdmin, async (req, res) => {
     res.json(
       (data || []).map((row) => ({
         _id: row.id,
-        studentId: row.users || row.users?.[0] || row.student_id,
-        courseId: row.courses || row.courses?.[0] || row.course_id,
+        studentId: row.users
+          ? { fullName: row.users.full_name, username: row.users.username, _id: row.student_id }
+          : row.student_id,
+        courseId: row.courses
+          ? { title: row.courses.title, _id: row.course_id }
+          : row.course_id,
         mode: row.mode,
         paymentType: row.payment_type,
         paymentStatus: row.payment_status,
@@ -76,40 +92,45 @@ router.get("/all", onlyAdmin, async (req, res) => {
       }))
     );
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Failed to load enrollments");
+    enrollmentError(res, "Failed to load enrollments", err);
   }
 });
 
 // ADMIN: mark offline as paid
 router.post("/mark-paid/:id", onlyAdmin, async (req, res) => {
   try {
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("enrollments")
       .update({ payment_status: "paid", status: "active" })
-      .eq("id", req.params.id);
+      .eq("id", req.params.id)
+      .select("id,payment_status,status")
+      .maybeSingle();
 
     if (error) throw error;
+    if (!data) return res.status(404).send("Enrollment not found");
+    emitEnrollmentChange(req, "updated", data);
     res.send("Enrollment marked as paid");
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Failed to update enrollment");
+    enrollmentError(res, "Failed to update enrollment", err);
   }
 });
 
 // ADMIN: mark as unpaid again
 router.post("/mark-unpaid/:id", onlyAdmin, async (req, res) => {
   try {
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("enrollments")
       .update({ payment_status: "unpaid", status: "pending" })
-      .eq("id", req.params.id);
+      .eq("id", req.params.id)
+      .select("id,payment_status,status")
+      .maybeSingle();
 
     if (error) throw error;
+    if (!data) return res.status(404).send("Enrollment not found");
+    emitEnrollmentChange(req, "updated", data);
     res.send("Enrollment marked as unpaid");
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Failed to update enrollment");
+    enrollmentError(res, "Failed to update enrollment", err);
   }
 });
 
@@ -122,10 +143,10 @@ router.delete("/:id", onlyAdmin, async (req, res) => {
       .eq("id", req.params.id);
 
     if (error) throw error;
+    emitEnrollmentChange(req, "deleted", { id: req.params.id });
     res.send("Enrollment deleted");
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Failed to delete enrollment");
+    enrollmentError(res, "Failed to delete enrollment", err);
   }
 });
 

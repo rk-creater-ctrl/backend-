@@ -30,7 +30,9 @@ router.post("/cover", onlyAdmin, upload.single("cover"), (req, res) => {
   }
 
   const relativePath = "uploads/" + req.file.filename;
-  const fullUrl = `${req.protocol}://${req.get("host")}/${relativePath}`;
+  const forwardedProto = req.get("x-forwarded-proto")?.split(",")[0].trim();
+  const protocol = forwardedProto || req.protocol;
+  const fullUrl = `${protocol}://${req.get("host")}/${relativePath}`;
 
   res.json({
     coverImageUrl: fullUrl,
