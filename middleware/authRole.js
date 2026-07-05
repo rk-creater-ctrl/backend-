@@ -69,4 +69,29 @@ function onlySuperAdmin(req, res, next) {
   next();
 }
 
-module.exports = { attachUser, onlyAdmin, onlySuperAdmin, getAdminLevel };
+function requireUser(req, res, next) {
+  if (!req.user || req.user.type !== "user") {
+    return res.status(401).send("Login required");
+  }
+  next();
+}
+
+function requireSelfOrAdmin(paramName = "studentId") {
+  return (req, res, next) => {
+    const targetId = req.params[paramName] || req.body?.[paramName];
+    const isSelf = req.user?.type === "user" && String(req.user._id) === String(targetId);
+    if (!isSelf && req.user?.type !== "admin") {
+      return res.status(403).send("Access denied");
+    }
+    next();
+  };
+}
+
+module.exports = {
+  attachUser,
+  onlyAdmin,
+  onlySuperAdmin,
+  requireUser,
+  requireSelfOrAdmin,
+  getAdminLevel,
+};

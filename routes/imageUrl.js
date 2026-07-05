@@ -1,11 +1,12 @@
 // routes/imageUrl.js
 const express  = require("express");
 const { supabase } = require("../supabaseClient");
+const { onlyAdmin } = require("../middleware/authRole");
 
 const router = express.Router();
 
 // create image url record
-router.post("/create", async (req, res) => {
+router.post("/create", onlyAdmin, async (req, res) => {
   try {
     const { label, url } = req.body;
     if (!label || !url) return res.status(400).send("label and url required");

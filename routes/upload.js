@@ -22,7 +22,16 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) {
+      return cb(new Error("Only JPEG, PNG, WebP, or GIF images are allowed"));
+    }
+    cb(null, true);
+  },
+});
 
 router.post("/cover", onlyAdmin, upload.single("cover"), (req, res) => {
   if (!req.file) {

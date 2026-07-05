@@ -1,6 +1,7 @@
 // routes/payment.js
 const express = require("express");
 const Razorpay = require("razorpay");
+const { requireUser } = require("../middleware/authRole");
 
 const router = express.Router();
 
@@ -17,7 +18,7 @@ const razor = hasRazorpayConfig
   : null;
 
 // Create Razorpay order
-router.post("/order", async (req, res) => {
+router.post("/order", requireUser, async (req, res) => {
   try {
     if (!razor) {
       return res.status(503).json({
@@ -26,16 +27,18 @@ router.post("/order", async (req, res) => {
     }
 
     const { amount, currency = "INR", receipt, notes } = req.body;
+    const numericAmount = Number(amount);
 
-    if (!amount || amount <= 0) {
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0 || numericAmount > 1000000) {
       return res.status(400).json({ message: "Invalid amount" });
     }
+    if (currency !== "INR") return res.status(400).json({ message: "Unsupported currency" });
 
     const options = {
-      amount: amount * 100, // rupees -> paise
+      amount: Math.round(numericAmount * 100), // rupees -> paise
       currency,
-      receipt: receipt || `rcpt_${Date.now()}`,
-      notes: notes || {},
+      receipt: String(receipt || `rcpt_${Date.now()}`).slice(0, 40),
+      notes: notes && typeof notes === "object" && !Array.isArray(notes) ? notes : {},
     };
 
     const order = await razor.orders.create(options);

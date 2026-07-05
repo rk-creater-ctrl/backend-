@@ -34,6 +34,10 @@ const upload = multer({
   limits: {
     fileSize: 1024 * 1024 * 500, // 500MB
   },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith("video/")) return cb(new Error("Only video files are allowed"));
+    cb(null, true);
+  },
 });
 
 function removeLocalVideoFile(fileUrl) {
@@ -174,6 +178,7 @@ router.post(
 
       return res.json({ success: true, video: data });
     } catch (err) {
+      if (req.file) removeLocalVideoFile(`uploads/videos/${req.file.filename}`);
       console.error("Upload video error:", err);
       return res.status(500).json({ error: "Failed to upload video" });
     }

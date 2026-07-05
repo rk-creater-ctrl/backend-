@@ -6,6 +6,10 @@ const socketIO = require("socket.io");
 const jwt      = require("jsonwebtoken");
 require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 
+if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
+  throw new Error("JWT_SECRET is required in production");
+}
+
 // Supabase client (server-side)
 require("./supabaseClient");
 
@@ -28,7 +32,12 @@ const app    = express();
 const server = http.createServer(app);
 const io     = socketIO(server, {
   cors: {
-    origin: "*",
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(normalizeOrigin(origin))) {
+        return callback(null, true);
+      }
+      return callback(new Error("Origin is not allowed by Socket.IO CORS"));
+    },
     methods: ["GET", "POST"]
   }
 });
@@ -59,14 +68,18 @@ const allowedOrigins = (process.env.FRONTEND_URLS || "")
 app.use(cors({
   origin(origin, callback) {
     // Requests without an Origin include mobile apps and health checks.
-    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(normalizeOrigin(origin))) {
+    if (
+      !origin ||
+      allowedOrigins.length === 0 ||
+      allowedOrigins.includes(normalizeOrigin(origin))
+    ) {
       return callback(null, true);
     }
     return callback(new Error("Origin is not allowed by CORS"));
   },
   credentials: true,
 }));
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 app.use(attachUser);
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
@@ -90,6 +103,25 @@ app.get("/", (req, res) => {
 
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
+});
+
+app.use((req, res) => {
+  res.status(404).json({ message: "Route not found" });
+});
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  if (err instanceof SyntaxError && err.status === 400) {
+    return res.status(400).json({ message: "Invalid JSON body" });
+  }
+  if (err?.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({ message: "Uploaded file is too large" });
+  }
+  if (err?.message?.startsWith("Only ")) {
+    return res.status(400).json({ message: err.message });
+  }
+  console.error("Unhandled request error:", err);
+  res.status(500).json({ message: "Internal server error" });
 });
 
 // ... rest of your server.js unchanged
@@ -234,4 +266,24 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log("Server running on port", PORT);
+  if (allowedOrigins.length === 0) {
+    console.warn("FRONTEND_URLS is empty; browser origins are unrestricted");
+  }
 });
+
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received; closing server`);
+  io.close();
+  server.close(() => {
+    process.exitCode = 0;
+  });
+  setTimeout(() => process.exit(1), 10000).unref();
+}
+
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+process.once("SIGINT", () => shutdown("SIGINT"));
+
+module.exports = { app, server, io };

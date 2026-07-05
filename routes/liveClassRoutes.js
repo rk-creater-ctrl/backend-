@@ -2,7 +2,7 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const router = express.Router();
 const { supabase } = require("../supabaseClient");
-const { onlyAdmin } = require("../middleware/authRole");
+const { onlyAdmin, requireSelfOrAdmin, requireUser } = require("../middleware/authRole");
 
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_key";
 
@@ -138,7 +138,7 @@ router.post("/admin/end-internal", onlyAdmin, async (req, res) => {
 });
 
 // Student: dashboard - check if they can see a live class card
-router.get("/student/:studentId", async (req, res) => {
+router.get("/student/:studentId", requireSelfOrAdmin(), async (req, res) => {
   try {
     const { studentId } = req.params;
 
@@ -164,10 +164,9 @@ router.get("/student/:studentId", async (req, res) => {
 });
 
 // Student: get a short-lived token for internal app-only live class
-router.post("/internal/viewer-token", async (req, res) => {
+router.post("/internal/viewer-token", requireUser, async (req, res) => {
   try {
-    const studentId = req.user?.type === "user" ? req.user._id : req.body.studentId;
-    if (!studentId) return res.status(401).json({ error: "Login required" });
+    const studentId = req.user._id;
 
     const enroll = await studentHasLiveAccess(studentId);
     if (!enroll) return res.status(403).json({ error: "No access" });

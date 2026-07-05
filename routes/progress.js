@@ -114,7 +114,7 @@ router.put("/:studentId/:courseId", async (req, res) => {
           completed_lesson_ids: nextIds,
         },
         // Prefer conflict target columns to avoid needing the exact constraint name
-        { onConflict: "(student_id,course_id)" }
+        { onConflict: "student_id,course_id" }
       )
       .select("student_id,course_id,completed_lesson_ids,updated_at")
       .single();
@@ -129,4 +129,3 @@ router.put("/:studentId/:courseId", async (req, res) => {
 });
 
 module.exports = router;
-

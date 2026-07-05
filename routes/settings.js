@@ -35,7 +35,7 @@ async function getSettings() {
     .from("app_settings")
     .select("key, brand_name, app_name, institute_name, logo_url")
     .eq("key", "global")
-    .single();
+    .maybeSingle();
 
   if (error) {
     // if row doesn’t exist, fall back to defaults

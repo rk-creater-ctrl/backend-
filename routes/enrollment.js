@@ -2,10 +2,12 @@
 const express = require("express");
 const router = express.Router();
 const { supabase } = require("../supabaseClient");
-const { onlyAdmin } = require("../middleware/authRole");
+const { onlyAdmin, requireSelfOrAdmin } = require("../middleware/authRole");
 
 const enrollmentSelect =
   "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at,users(full_name,username),courses(title)";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const validId = (id) => UUID_PATTERN.test(String(id || ""));
 
 function emitEnrollmentChange(req, action, enrollment) {
   req.app.get("io")?.emit("enrollment:changed", { action, enrollment });
@@ -13,23 +15,43 @@ function emitEnrollmentChange(req, action, enrollment) {
 
 function enrollmentError(res, message, err) {
   console.error(message, err);
-  const detail = err?.message || message;
-  res.status(500).json({ message, detail });
+  const payload = { message };
+  if (process.env.NODE_ENV !== "production") payload.detail = err?.message || message;
+  res.status(500).json(payload);
 }
 
 // Student creates enrollment (offline OR online placeholder)
-router.post("/", async (req, res) => {
+router.post("/", requireSelfOrAdmin(), async (req, res) => {
   try {
     const { studentId, courseId, mode, paymentType, offlineDetails } = req.body;
+    if (!validId(studentId) || !validId(courseId)) {
+      return res.status(400).send("Invalid student or course ID");
+    }
+    if (!["online", "offline"].includes(mode) || !["online", "offline"].includes(paymentType)) {
+      return res.status(400).send("Invalid enrollment mode or payment type");
+    }
+    if (mode === "offline" && (!offlineDetails || typeof offlineDetails !== "object" || Array.isArray(offlineDetails))) {
+      return res.status(400).send("Offline details are required");
+    }
 
     const { data: course, error: cErr } = await supabase
       .from("courses")
       .select("id,price")
       .eq("id", courseId)
-      .single();
+      .maybeSingle();
 
     if (cErr) throw cErr;
     if (!course) return res.status(404).send("Course not found");
+
+    const { data: existing, error: existingError } = await supabase
+      .from("enrollments")
+      .select("id")
+      .eq("student_id", studentId)
+      .eq("course_id", courseId)
+      .limit(1)
+      .maybeSingle();
+    if (existingError) throw existingError;
+    if (existing) return res.status(409).send("Already enrolled in this course");
 
     const amount = Number(course.price || 0);
 
@@ -99,6 +121,7 @@ router.get("/all", onlyAdmin, async (req, res) => {
 // ADMIN: mark offline as paid
 router.post("/mark-paid/:id", onlyAdmin, async (req, res) => {
   try {
+    if (!validId(req.params.id)) return res.status(400).send("Invalid enrollment ID");
     const { data, error } = await supabase
       .from("enrollments")
       .update({ payment_status: "paid", status: "active" })
@@ -118,6 +141,7 @@ router.post("/mark-paid/:id", onlyAdmin, async (req, res) => {
 // ADMIN: mark as unpaid again
 router.post("/mark-unpaid/:id", onlyAdmin, async (req, res) => {
   try {
+    if (!validId(req.params.id)) return res.status(400).send("Invalid enrollment ID");
     const { data, error } = await supabase
       .from("enrollments")
       .update({ payment_status: "unpaid", status: "pending" })
@@ -137,6 +161,7 @@ router.post("/mark-unpaid/:id", onlyAdmin, async (req, res) => {
 // ADMIN: delete enrollment
 router.delete("/:id", onlyAdmin, async (req, res) => {
   try {
+    if (!validId(req.params.id)) return res.status(400).send("Invalid enrollment ID");
     const { error } = await supabase
       .from("enrollments")
       .delete()
@@ -151,9 +176,10 @@ router.delete("/:id", onlyAdmin, async (req, res) => {
 });
 
 // STUDENT: my enrollments / fees
-router.get("/my-fees/:studentId", async (req, res) => {
+router.get("/my-fees/:studentId", requireSelfOrAdmin(), async (req, res) => {
   try {
     const { studentId } = req.params;
+    if (!validId(studentId)) return res.status(400).send("Invalid student ID");
 
     const { data, error } = await supabase
       .from("enrollments")
