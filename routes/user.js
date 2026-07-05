@@ -6,6 +6,8 @@ const { onlyAdmin, getAdminLevel } = require("../middleware/authRole");
 
 const router = express.Router();
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 router.use(onlyAdmin);
 
 function isRealAdmin(req) {
@@ -24,6 +26,11 @@ function toUserResponse(user, adminAccount) {
 }
 
 async function fetchUserById(userId) {
+  if (!UUID_PATTERN.test(String(userId || ""))) {
+    const err = new Error("Invalid user ID");
+    err.status = 400;
+    throw err;
+  }
   const { data, error } = await supabase
     .from("users")
     .select("id,full_name,username,password_hash,role,created_at")
@@ -112,6 +119,7 @@ router.get("/list", async (req, res) => {
       (users || []).map((user) => {
         const adminAccount = adminByUsername.get(user.username);
         return {
+          _id: user.id,
           id: user.id,
           fullName: user.full_name,
           username: user.username,
@@ -341,7 +349,7 @@ router.patch("/:id/role", async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    res.status(500).send("Error updating role");
+    res.status(err.status || 500).send(err.message || "Error updating role");
   }
 });
 
@@ -384,7 +392,7 @@ router.delete("/:id", async (req, res) => {
     res.send("Deleted");
   } catch (err) {
     console.error(err);
-    res.status(500).send("Error deleting user");
+    res.status(err.status || 500).send(err.message || "Error deleting user");
   }
 });
 
