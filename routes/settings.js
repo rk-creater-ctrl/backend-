@@ -101,7 +101,7 @@ async function saveSettings(req, res) {
         app_name: appName,
         institute_name: instituteName,
         logo_url: logoUrl,
-      })
+      }, { onConflict: "key" })
       .select("key, brand_name, app_name, institute_name, logo_url")
       .single();
 
