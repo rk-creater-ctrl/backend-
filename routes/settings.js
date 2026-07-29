@@ -50,23 +50,29 @@ async function getSettings() {
   const instituteName =
     String(settings.institute_name || "").trim() ||
     legacyInstituteName(settings.app_name);
+  const appName =
+    String(settings.app_name || settings.brand_name || "").trim() ||
+    FIXED_BRAND_NAME;
 
   return {
     ...DEFAULT_SETTINGS,
     key: settings.key,
-    brandName: FIXED_BRAND_NAME,
-    appName: FIXED_BRAND_NAME,
+    brandName: appName,
+    appName,
     instituteName: instituteName || DEFAULT_INSTITUTE_NAME,
     logoUrl: settings.logo_url || "",
   };
 }
 
 function toResponse(settings) {
+  const appName =
+    String(settings.appName || settings.brandName || "").trim() ||
+    FIXED_BRAND_NAME;
   const instituteName = String(settings.instituteName || "").trim();
 
   return {
-    brandName: FIXED_BRAND_NAME,
-    appName: FIXED_BRAND_NAME,
+    brandName: appName,
+    appName,
     instituteName: instituteName || DEFAULT_INSTITUTE_NAME,
     logoUrl: settings.logoUrl || "",
   };
@@ -74,10 +80,13 @@ function toResponse(settings) {
 
 async function saveSettings(req, res) {
   try {
-    const instituteName = String(
-      req.body.instituteName || req.body.appName || ""
-    ).trim();
+    const appName = String(req.body.appName || req.body.brandName || "").trim();
+    const instituteName = String(req.body.instituteName || "").trim();
     const logoUrl = String(req.body.logoUrl || "").trim();
+
+    if (!appName) {
+      return res.status(400).json({ message: "App name is required" });
+    }
 
     if (!instituteName) {
       return res.status(400).json({ message: "Institute name is required" });
@@ -88,12 +97,12 @@ async function saveSettings(req, res) {
       .from("app_settings")
       .upsert({
         key: "global",
-        brand_name: FIXED_BRAND_NAME,
-        app_name: FIXED_BRAND_NAME,
+        brand_name: appName,
+        app_name: appName,
         institute_name: instituteName,
         logo_url: logoUrl,
       })
-      .select("key, institute_name, logo_url")
+      .select("key, brand_name, app_name, institute_name, logo_url")
       .single();
 
     if (error) throw error;
@@ -101,6 +110,8 @@ async function saveSettings(req, res) {
     // Map DB -> API response shape
     res.json(
       toResponse({
+        brandName: data?.brand_name,
+        appName: data?.app_name,
         instituteName: data?.institute_name,
         logoUrl: data?.logo_url,
       })

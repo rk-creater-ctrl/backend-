@@ -181,8 +181,11 @@ router.delete("/:id", onlyAdmin, async (req, res) => {
       .select("id")
       .maybeSingle();
     if (error) throw error;
-    if (!data) return res.status(404).send("Course not found");
-    res.json({ success: true, deletedId: data.id });
+    res.json({
+      success: true,
+      deletedId: data?.id || req.params.id,
+      alreadyDeleted: !data,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).send("Error deleting course");
