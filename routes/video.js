@@ -62,6 +62,31 @@ function removeLocalVideoFile(fileUrl) {
   }
 }
 
+function extractYouTubeVideoId(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  const directId = raw.match(/^[a-zA-Z0-9_-]{11}$/);
+  if (directId) return raw;
+
+  try {
+    const url = new URL(raw);
+    if (url.hostname.includes("youtu.be")) {
+      return url.pathname.split("/").filter(Boolean)[0] || "";
+    }
+    if (url.searchParams.get("v")) {
+      return url.searchParams.get("v") || "";
+    }
+    const embedMatch = url.pathname.match(/\/(?:embed|shorts|live)\/([a-zA-Z0-9_-]{11})/);
+    if (embedMatch) return embedMatch[1];
+  } catch {
+    // raw was not a URL; try common pasted fragments below
+  }
+
+  const looseMatch = raw.match(/(?:v=|youtu\.be\/|embed\/|shorts\/|live\/)([a-zA-Z0-9_-]{11})/);
+  return looseMatch?.[1] || raw;
+}
+
 async function deleteVideoById(req, res) {
   try {
     const { data: video, error: selError } = await supabase
@@ -116,7 +141,9 @@ router.get("/all", onlyAdmin, async (req, res) => {
 router.post("/all", onlyAdmin, async (req, res) => {
   try {
     const { title, youtubeVideoId, order } = req.body;
-    if (!title || !youtubeVideoId) {
+    const cleanYouTubeVideoId = extractYouTubeVideoId(youtubeVideoId);
+
+    if (!title || !cleanYouTubeVideoId) {
       return res.status(400).json({ error: "title and youtubeVideoId required" });
     }
 
@@ -125,7 +152,7 @@ router.post("/all", onlyAdmin, async (req, res) => {
       .insert({
         title,
         type: "youtube",
-        youtube_video_id: youtubeVideoId,
+        youtube_video_id: cleanYouTubeVideoId,
         order: typeof order === "number" ? order : Number(order) || 0,
       })
       .select("id,title,type,youtube_video_id,file_url,order,created_at")
@@ -209,7 +236,7 @@ router.get("/public", async (req, res) => {
       id: v.id,
       title: v.title,
       type: v.type,
-      youtubeVideoId: v.youtube_video_id,
+      youtubeVideoId: extractYouTubeVideoId(v.youtube_video_id),
       fileUrl: v.file_url,
     }));
 
