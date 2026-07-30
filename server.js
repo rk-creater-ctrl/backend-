@@ -60,7 +60,14 @@ function normalizeOrigin(value) {
   return String(value || "").trim().replace(/\/$/, "").toLowerCase();
 }
 
-const allowedOrigins = (process.env.FRONTEND_URLS || "")
+const allowedOrigins = [
+  process.env.FRONTEND_URLS,
+  process.env.BASE_URL,
+  process.env.RENDER_EXTERNAL_URL,
+  "https://backend-7sek.onrender.com",
+]
+  .filter(Boolean)
+  .join(",")
   .split(",")
   .map(normalizeOrigin)
   .filter(Boolean);

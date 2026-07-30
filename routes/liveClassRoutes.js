@@ -361,11 +361,20 @@ router.get("/internal/viewer", async (req, res) => {
       return pc;
     }
 
-    const socket = io({ transports: ["websocket", "polling"] });
+    const socket = io({
+      transports: ["websocket", "polling"],
+      reconnectionAttempts: 4,
+      timeout: 12000
+    });
 
     socket.on("connect", () => {
       setStatus("Waiting for teacher stream...");
       socket.emit("internal-live:viewer-join", { token });
+    });
+
+    socket.on("connect_error", (error) => {
+      setStatus("Live connection failed. Please refresh or try another network.");
+      console.error("Socket connection error", error && error.message);
     });
 
     socket.on("internal-live:offer", async ({ from, offer }) => {
