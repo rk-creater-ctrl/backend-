@@ -256,8 +256,10 @@ router.get("/internal/viewer", async (req, res) => {
     .stage { flex: 1; display: grid; grid-template-rows: auto minmax(240px, 1fr); gap: 12px; padding: 12px; }
     .classroom { border: 1px solid rgba(148,163,184,.18); background: rgba(15,23,42,.72); border-radius: 18px; padding: 10px; box-shadow: 0 18px 40px rgba(0,0,0,.28); }
     .video-shell { position: relative; overflow: hidden; border-radius: 15px; background: #000; border: 1px solid #1f2937; }
-    video { width: 100%; min-height: 230px; max-height: 44vh; display: block; background: #000; object-fit: contain; }
+    video { width: 100%; min-height: 230px; max-height: 72vh; display: block; background: #000; object-fit: contain; }
     .video-label { position: absolute; left: 10px; top: 10px; padding: 5px 9px; border-radius: 999px; background: rgba(2,6,23,.76); border: 1px solid rgba(148,163,184,.22); color: #e5e7eb; font-size: 11px; font-weight: 800; }
+    .video-shell:fullscreen { width: 100vw; height: 100vh; border: 0; border-radius: 0; display: grid; place-items: center; background: #000; }
+    .video-shell:fullscreen video { width: 100vw; height: 100vh; min-height: 0; max-height: none; object-fit: contain; }
     .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
     button { border: 0; border-radius: 999px; padding: 11px 12px; background: #22c55e; color: #020617; font-weight: 800; }
     .secondary { background: #0f172a; color: #e5e7eb; border: 1px solid #334155; }
@@ -295,6 +297,7 @@ router.get("/internal/viewer", async (req, res) => {
         </div>
         <div class="controls">
           <button id="playButton" type="button">Play Live Class</button>
+          <button id="fullscreenVideoButton" class="secondary" type="button">Fullscreen Video</button>
           <button id="raiseHandButton" class="secondary" type="button">Raise Hand</button>
         </div>
       </section>
@@ -314,7 +317,9 @@ router.get("/internal/viewer", async (req, res) => {
     const studentName = ${safeStudentName};
     const statusEl = document.getElementById("status");
     const remoteVideo = document.getElementById("remoteVideo");
+    const videoShell = document.querySelector(".video-shell");
     const playButton = document.getElementById("playButton");
+    const fullscreenVideoButton = document.getElementById("fullscreenVideoButton");
     const raiseHandButton = document.getElementById("raiseHandButton");
     const messagesEl = document.getElementById("messages");
     const chatForm = document.getElementById("chatForm");
@@ -414,6 +419,24 @@ router.get("/internal/viewer", async (req, res) => {
 
     playButton.addEventListener("click", () => {
       remoteVideo.play().catch(() => {});
+    });
+
+    fullscreenVideoButton.addEventListener("click", async () => {
+      try {
+        if (!document.fullscreenElement && videoShell.requestFullscreen) {
+          await videoShell.requestFullscreen();
+          fullscreenVideoButton.textContent = "Exit Fullscreen";
+        } else if (document.exitFullscreen) {
+          await document.exitFullscreen();
+          fullscreenVideoButton.textContent = "Fullscreen Video";
+        }
+      } catch {}
+    });
+
+    document.addEventListener("fullscreenchange", () => {
+      fullscreenVideoButton.textContent = document.fullscreenElement
+        ? "Exit Fullscreen"
+        : "Fullscreen Video";
     });
 
     raiseHandButton.addEventListener("click", () => {
