@@ -6,6 +6,12 @@ const { onlyAdmin, requireSelfOrAdmin } = require("../middleware/authRole");
 
 const enrollmentSelect =
   "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,student_address,aadhar_number,mobile_number,enrollment_expires_at,offline_address,offline_teacher_name,offline_phone,offline_message,created_at,users(full_name,username),courses(title)";
+const legacyEnrollmentSelect =
+  "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,offline_address,offline_teacher_name,offline_phone,offline_message,created_at,users(full_name,username),courses(title)";
+const myFeesSelect =
+  "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,student_address,aadhar_number,mobile_number,enrollment_expires_at,created_at,courses(title,price,description,cover_image_url,category)";
+const legacyMyFeesSelect =
+  "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at,courses(title,price,description,cover_image_url,category)";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const validId = (id) => UUID_PATTERN.test(String(id || ""));
 
@@ -38,6 +44,28 @@ function buildRegistrationDetails(offlineDetails = {}) {
   const message = String(offlineDetails.message || "").trim();
 
   return { address, aadharNumber, mobileNumber, teacherName, message };
+}
+
+function isMissingColumnError(error) {
+  const message = String(error?.message || error?.details || "").toLowerCase();
+  return (
+    error?.code === "42703" ||
+    error?.code === "PGRST204" ||
+    message.includes("column") ||
+    message.includes("schema cache")
+  );
+}
+
+async function selectEnrollmentsWithFallback(selectClause, fallbackClause, applyQuery) {
+  let query = supabase.from("enrollments").select(selectClause);
+  query = applyQuery(query);
+  const result = await query;
+  if (!result.error || !isMissingColumnError(result.error)) return result;
+
+  console.warn("Enrollment query used legacy fallback:", result.error.message);
+  let fallbackQuery = supabase.from("enrollments").select(fallbackClause);
+  fallbackQuery = applyQuery(fallbackQuery);
+  return fallbackQuery;
 }
 
 // Student creates enrollment (offline OR online placeholder)
@@ -86,9 +114,7 @@ router.post("/", requireSelfOrAdmin(), async (req, res) => {
 
     const amount = Number(course.price || 0);
 
-    const { data: enrollment, error: eErr } = await supabase
-      .from("enrollments")
-      .insert({
+    const insertPayload = {
         student_id: studentId,
         course_id: courseId,
         mode,
@@ -113,11 +139,30 @@ router.post("/", requireSelfOrAdmin(), async (req, res) => {
         offline_teacher_name: registrationDetails.teacherName || null,
         offline_phone: registrationDetails.mobileNumber,
         offline_message: registrationDetails.message || null,
-      })
+      };
+
+    let { data: enrollment, error: eErr } = await supabase
+      .from("enrollments")
+      .insert(insertPayload)
       .select(
         "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,student_address,aadhar_number,mobile_number,created_at"
       )
       .single();
+
+    if (eErr && isMissingColumnError(eErr)) {
+      console.warn("Enrollment insert used legacy fallback:", eErr.message);
+      const legacyPayload = { ...insertPayload };
+      delete legacyPayload.student_address;
+      delete legacyPayload.aadhar_number;
+      delete legacyPayload.mobile_number;
+      const legacyResult = await supabase
+        .from("enrollments")
+        .insert(legacyPayload)
+        .select("id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at")
+        .single();
+      enrollment = legacyResult.data;
+      eErr = legacyResult.error;
+    }
 
     if (eErr) throw eErr;
 
@@ -134,10 +179,11 @@ router.post("/", requireSelfOrAdmin(), async (req, res) => {
 // ADMIN: list enrollments
 router.get("/all", onlyAdmin, async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("enrollments")
-      .select(enrollmentSelect)
-      .order("created_at", { ascending: false });
+    const { data, error } = await selectEnrollmentsWithFallback(
+      enrollmentSelect,
+      legacyEnrollmentSelect,
+      (query) => query.order("created_at", { ascending: false })
+    );
 
     if (error) throw error;
 
@@ -178,16 +224,29 @@ router.post("/mark-paid/:id", onlyAdmin, async (req, res) => {
   try {
     if (!validId(req.params.id)) return res.status(400).send("Invalid enrollment ID");
     const expiresAt = req.body?.expiresAt || null;
-    const { data, error } = await supabase
-      .from("enrollments")
-      .update({
+    const updatePayload = {
         payment_status: "paid",
         status: "active",
         enrollment_expires_at: expiresAt,
-      })
+      };
+    let { data, error } = await supabase
+      .from("enrollments")
+      .update(updatePayload)
       .eq("id", req.params.id)
       .select("id,payment_status,status,student_id,course_id,enrollment_expires_at,courses(title)")
       .maybeSingle();
+
+    if (error && isMissingColumnError(error)) {
+      console.warn("Mark-paid used legacy fallback:", error.message);
+      const legacyResult = await supabase
+        .from("enrollments")
+        .update({ payment_status: "paid", status: "active" })
+        .eq("id", req.params.id)
+        .select("id,payment_status,status,student_id,course_id,courses(title)")
+        .maybeSingle();
+      data = legacyResult.data;
+      error = legacyResult.error;
+    }
 
     if (error) throw error;
     if (!data) return res.status(404).send("Enrollment not found");
@@ -255,13 +314,11 @@ router.get("/my-fees/:studentId", requireSelfOrAdmin(), async (req, res) => {
     const { studentId } = req.params;
     if (!validId(studentId)) return res.status(400).send("Invalid student ID");
 
-    const { data, error } = await supabase
-      .from("enrollments")
-      .select(
-        "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,student_address,aadhar_number,mobile_number,enrollment_expires_at,created_at,courses(title,price,description,cover_image_url,category)"
-      )
-      .eq("student_id", studentId)
-      .order("created_at", { ascending: false });
+    const { data, error } = await selectEnrollmentsWithFallback(
+      myFeesSelect,
+      legacyMyFeesSelect,
+      (query) => query.eq("student_id", studentId).order("created_at", { ascending: false })
+    );
 
     if (error) throw error;
 
