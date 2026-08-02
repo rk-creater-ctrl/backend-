@@ -251,6 +251,51 @@ io.on("connection", (socket) => {
     );
   });
 
+  socket.on("internal-live:set-student-permissions", ({ viewerId, permissions }) => {
+    if (socket.data.internalLiveRole !== "broadcaster" || !viewerId) return;
+    io.to(viewerId).emit("internal-live:student-permissions", {
+      permissions: {
+        mic: permissions?.mic === true,
+        camera: permissions?.camera === true,
+        screen: permissions?.screen === true,
+      },
+    });
+  });
+
+  socket.on("internal-live:student-media-offer", ({ to, offer, mediaType }) => {
+    if (socket.data.internalLiveRole !== "viewer" || !to || !offer) return;
+    io.to(to).emit("internal-live:student-media-offer", {
+      from: socket.id,
+      name: socket.data.internalLiveName || "Student",
+      offer,
+      mediaType: mediaType || "camera",
+    });
+  });
+
+  socket.on("internal-live:student-media-answer", ({ to, answer }) => {
+    if (socket.data.internalLiveRole !== "broadcaster" || !to || !answer) return;
+    io.to(to).emit("internal-live:student-media-answer", {
+      from: socket.id,
+      answer,
+    });
+  });
+
+  socket.on("internal-live:student-media-candidate", ({ to, candidate }) => {
+    if (!to || !candidate) return;
+    io.to(to).emit("internal-live:student-media-candidate", {
+      from: socket.id,
+      candidate,
+    });
+  });
+
+  socket.on("internal-live:student-media-stopped", ({ mediaType }) => {
+    if (socket.data.internalLiveRole !== "viewer" || !internalLiveBroadcasterId) return;
+    io.to(internalLiveBroadcasterId).emit("internal-live:student-media-stopped", {
+      viewerId: socket.id,
+      mediaType: mediaType || "camera",
+    });
+  });
+
   socket.on("disconnect", () => {
     if (socket.id === internalLiveBroadcasterId) {
       internalLiveBroadcasterId = null;

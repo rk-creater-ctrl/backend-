@@ -33,16 +33,18 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-async function studentHasLiveAccess(studentId) {
-  const { data, error } = await supabase
+async function studentHasLiveAccess(studentId, courseId = null) {
+  let query = supabase
     .from("enrollments")
-    .select("id")
+    .select("id,course_id")
     .eq("student_id", studentId)
     .eq("payment_status", "paid")
     .eq("status", "active")
-    .or(`enrollment_expires_at.is.null,enrollment_expires_at.gt.${new Date().toISOString()}`)
-    .limit(1)
-    .maybeSingle();
+    .or(`enrollment_expires_at.is.null,enrollment_expires_at.gt.${new Date().toISOString()}`);
+
+  if (courseId) query = query.eq("course_id", courseId);
+
+  const { data, error } = await query.limit(1).maybeSingle();
   if (error) throw error;
   return data;
 }
@@ -53,6 +55,7 @@ function toLiveClass(row) {
     _id: row.id,
     key: row.key,
     title: row.title,
+    courseId: row.course_id,
     status: row.status,
     scheduledAt: row.scheduled_at,
     youtubeVideoId: row.youtube_video_id,
@@ -89,11 +92,12 @@ async function saveGlobalLiveClass(values) {
 // Admin: save heading + schedule for global live class
 router.post("/admin/save", onlyAdmin, async (req, res) => {
   try {
-    const { title, scheduledAt } = req.body;
+    const { title, scheduledAt, courseId } = req.body;
 
     const existing = await getGlobalLiveClass();
     const live = await saveGlobalLiveClass({
       title: title || existing?.title || "Live class",
+      course_id: courseId || null,
       scheduled_at: scheduledAt || existing?.scheduled_at || null,
     });
     res.json({ success: true, liveClass: toLiveClass(live), iceServers: getIceServers() });
@@ -106,11 +110,12 @@ router.post("/admin/save", onlyAdmin, async (req, res) => {
 // Admin: start internal app-only live class
 router.post("/admin/start-internal", onlyAdmin, async (req, res) => {
   try {
-    const { title } = req.body;
+    const { title, courseId } = req.body;
 
     const existing = await getGlobalLiveClass();
     const live = await saveGlobalLiveClass({
       title: title || existing?.title || "Live class",
+      course_id: courseId || null,
       status: "live",
       active_mode: "internal",
       internal_live_active: true,
@@ -122,7 +127,7 @@ router.post("/admin/start-internal", onlyAdmin, async (req, res) => {
       title: "Live class started",
       message: live.title || "Teacher is live now.",
       type: "live",
-      course_id: null,
+      course_id: live.course_id || null,
       target_role: "student",
     }).then(({ error: notificationError }) => {
       if (notificationError) console.error("Live notification error:", notificationError.message);
@@ -157,11 +162,16 @@ router.get("/student/:studentId", requireSelfOrAdmin(), async (req, res) => {
   try {
     const { studentId } = req.params;
 
-    const enroll = await studentHasLiveAccess(studentId);
-    if (!enroll) return res.json({ hasAccess: false });
-
     const live = await getGlobalLiveClass();
-    if (!live) return res.json({ hasAccess: true, hasLive: false });
+    if (!live) {
+      const enroll = await studentHasLiveAccess(studentId);
+      return res.json({ hasAccess: Boolean(enroll), hasLive: false });
+    }
+
+    const hasAccess = live.course_id
+      ? Boolean(await studentHasLiveAccess(studentId, live.course_id))
+      : Boolean(await studentHasLiveAccess(studentId));
+    if (!hasAccess) return res.json({ hasAccess: false });
 
     res.json({
       hasAccess: true,
@@ -169,6 +179,7 @@ router.get("/student/:studentId", requireSelfOrAdmin(), async (req, res) => {
       title: live.title,
       status: live.status,
       scheduledAt: live.scheduled_at,
+      courseId: live.course_id,
       activeMode: live.active_mode || "internal",
       internalLiveActive: live.internal_live_active === true,
     });
@@ -183,15 +194,15 @@ router.post("/internal/viewer-token", requireUser, async (req, res) => {
   try {
     const studentId = req.user._id;
 
-    const enroll = await studentHasLiveAccess(studentId);
-    if (!enroll) return res.status(403).json({ error: "No access" });
-
     const live = await getGlobalLiveClass();
 
     if (!live || live.active_mode !== "internal" || !live.internal_live_active ||
         live.status !== "live" || !live.internal_room_code) {
       return res.status(404).json({ error: "No internal live class" });
     }
+
+    const enroll = await studentHasLiveAccess(studentId, live.course_id || null);
+    if (!enroll) return res.status(403).json({ error: "No access for this live class" });
 
     const { data: user, error: userError } = await supabase
       .from("users")
@@ -273,6 +284,13 @@ router.get("/internal/viewer", async (req, res) => {
     .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
     button { border: 0; border-radius: 999px; padding: 11px 12px; background: #22c55e; color: #020617; font-weight: 800; }
     .secondary { background: #0f172a; color: #e5e7eb; border: 1px solid #334155; }
+    .student-access { display: none; margin-top: 10px; padding: 10px; border-radius: 16px; border: 1px solid rgba(56,189,248,.2); background: rgba(8,47,73,.3); }
+    .student-access.visible { display: block; }
+    .student-access-title { font-size: 12px; color: #bae6fd; font-weight: 800; margin-bottom: 8px; }
+    .student-access-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .student-access button { display: none; }
+    .student-access button.visible { display: block; }
+    .danger { background: #ef4444; color: #fff; }
     .hand-active { background: #f97316; color: #111827; }
     .chat { min-height: 260px; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; overflow: hidden; background: rgba(7,17,31,.88); display: flex; flex-direction: column; box-shadow: 0 18px 40px rgba(0,0,0,.22); }
     .chat-head { padding: 12px; border-bottom: 1px solid #1f2937; font-weight: 800; display: flex; justify-content: space-between; align-items: center; }
@@ -316,6 +334,15 @@ router.get("/internal/viewer", async (req, res) => {
           <button id="fullscreenVideoButton" class="secondary" type="button">Fullscreen Video</button>
           <button id="raiseHandButton" class="secondary" type="button">Raise Hand</button>
         </div>
+        <div id="studentAccessPanel" class="student-access">
+          <div class="student-access-title">Host allowed you to participate</div>
+          <div class="student-access-buttons">
+            <button id="studentMicButton" class="secondary" type="button">Share Mic</button>
+            <button id="studentCameraButton" class="secondary" type="button">Share Camera</button>
+            <button id="studentScreenButton" class="secondary" type="button">Share Screen</button>
+            <button id="studentStopShareButton" class="danger" type="button">Stop Sharing</button>
+          </div>
+        </div>
       </section>
       <section class="chat">
         <div class="chat-head">Live Comments <span>Ask doubts live</span></div>
@@ -339,11 +366,20 @@ router.get("/internal/viewer", async (req, res) => {
     const playButton = document.getElementById("playButton");
     const fullscreenVideoButton = document.getElementById("fullscreenVideoButton");
     const raiseHandButton = document.getElementById("raiseHandButton");
+    const studentAccessPanel = document.getElementById("studentAccessPanel");
+    const studentMicButton = document.getElementById("studentMicButton");
+    const studentCameraButton = document.getElementById("studentCameraButton");
+    const studentScreenButton = document.getElementById("studentScreenButton");
+    const studentStopShareButton = document.getElementById("studentStopShareButton");
     const messagesEl = document.getElementById("messages");
     const chatForm = document.getElementById("chatForm");
     const chatInput = document.getElementById("chatInput");
     let pc;
+    let studentMediaPc;
+    let studentMediaStream;
+    let activeStudentMediaType = null;
     let broadcasterId = null;
+    let studentPermissions = { mic: false, camera: false, screen: false };
 
     function setStatus(text) {
       statusEl.textContent = text;
@@ -411,6 +447,86 @@ router.get("/internal/viewer", async (req, res) => {
       return pc;
     }
 
+    function updateStudentAccessButtons() {
+      const hasAny = studentPermissions.mic || studentPermissions.camera || studentPermissions.screen;
+      studentAccessPanel.classList.toggle("visible", hasAny);
+      studentMicButton.classList.toggle("visible", studentPermissions.mic);
+      studentCameraButton.classList.toggle("visible", studentPermissions.camera);
+      studentScreenButton.classList.toggle("visible", studentPermissions.screen);
+      studentStopShareButton.classList.toggle("visible", Boolean(studentMediaStream));
+    }
+
+    function stopStudentMedia() {
+      if (studentMediaPc) {
+        studentMediaPc.close();
+        studentMediaPc = null;
+      }
+      if (studentMediaStream) {
+        studentMediaStream.getTracks().forEach((track) => track.stop());
+        studentMediaStream = null;
+      }
+      if (activeStudentMediaType) {
+        socket.emit("internal-live:student-media-stopped", { mediaType: activeStudentMediaType });
+      }
+      activeStudentMediaType = null;
+      updateStudentAccessButtons();
+      setStatus("Stopped sharing your media");
+    }
+
+    async function startStudentMedia(mediaType) {
+      if (!broadcasterId) {
+        setStatus("Teacher connection is not ready yet");
+        return;
+      }
+
+      if (!studentPermissions[mediaType]) {
+        setStatus("Host has not allowed this option");
+        return;
+      }
+
+      stopStudentMedia();
+
+      try {
+        if (mediaType === "screen") {
+          studentMediaStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        } else {
+          studentMediaStream = await navigator.mediaDevices.getUserMedia({
+            video: mediaType === "camera",
+            audio: mediaType === "mic" || mediaType === "camera",
+          });
+        }
+
+        activeStudentMediaType = mediaType;
+        studentMediaPc = new RTCPeerConnection({ iceServers: ${iceServers} });
+        studentMediaStream.getTracks().forEach((track) => studentMediaPc.addTrack(track, studentMediaStream));
+        studentMediaStream.getTracks().forEach((track) => {
+          track.onended = () => stopStudentMedia();
+        });
+
+        studentMediaPc.onicecandidate = (event) => {
+          if (event.candidate && broadcasterId) {
+            socket.emit("internal-live:student-media-candidate", {
+              to: broadcasterId,
+              candidate: event.candidate
+            });
+          }
+        };
+
+        const offer = await studentMediaPc.createOffer();
+        await studentMediaPc.setLocalDescription(offer);
+        socket.emit("internal-live:student-media-offer", {
+          to: broadcasterId,
+          offer,
+          mediaType
+        });
+        updateStudentAccessButtons();
+        setStatus("Sharing " + mediaType + " with teacher");
+      } catch (error) {
+        stopStudentMedia();
+        setStatus("Could not start sharing. Permission may be blocked.");
+      }
+    }
+
     const socket = io({
       transports: ["websocket", "polling"],
       reconnectionAttempts: 4,
@@ -440,6 +556,28 @@ router.get("/internal/viewer", async (req, res) => {
       if (!candidate || !pc) return;
       try {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch {}
+    });
+
+    socket.on("internal-live:student-permissions", ({ permissions }) => {
+      studentPermissions = {
+        mic: permissions && permissions.mic === true,
+        camera: permissions && permissions.camera === true,
+        screen: permissions && permissions.screen === true
+      };
+      updateStudentAccessButtons();
+      if (activeStudentMediaType && !studentPermissions[activeStudentMediaType]) stopStudentMedia();
+    });
+
+    socket.on("internal-live:student-media-answer", async ({ answer }) => {
+      if (!studentMediaPc || !answer) return;
+      await studentMediaPc.setRemoteDescription(new RTCSessionDescription(answer));
+    });
+
+    socket.on("internal-live:student-media-candidate", async ({ candidate }) => {
+      if (!studentMediaPc || !candidate) return;
+      try {
+        await studentMediaPc.addIceCandidate(new RTCIceCandidate(candidate));
       } catch {}
     });
 
@@ -493,6 +631,11 @@ router.get("/internal/viewer", async (req, res) => {
         raiseHandButton.classList.remove("hand-active");
       }, 5000);
     });
+
+    studentMicButton.addEventListener("click", () => startStudentMedia("mic"));
+    studentCameraButton.addEventListener("click", () => startStudentMedia("camera"));
+    studentScreenButton.addEventListener("click", () => startStudentMedia("screen"));
+    studentStopShareButton.addEventListener("click", stopStudentMedia);
 
     chatForm.addEventListener("submit", (event) => {
       event.preventDefault();
