@@ -62,6 +62,65 @@ function removeLocalVideoFile(fileUrl) {
   }
 }
 
+function safeFileName(name) {
+  return String(name || "file")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120);
+}
+
+function publicUrlFor(bucket, storagePath) {
+  const { data } = supabase.storage.from(bucket).getPublicUrl(storagePath);
+  return data?.publicUrl || "";
+}
+
+async function uploadFileToSupabaseStorage(file, folder, bucketName) {
+  const bucket = bucketName || process.env.SUPABASE_VIDEO_BUCKET || "course-videos";
+  const ext = path.extname(file.originalname) || ".mp4";
+  const name = safeFileName(path.basename(file.originalname, ext));
+  const storagePath = `${folder}/${Date.now()}-${Math.round(Math.random() * 1e9)}-${name}${ext}`;
+  const buffer = fs.readFileSync(file.path);
+
+  await supabase.storage.createBucket(bucket, { public: true }).catch((err) => {
+    const message = String(err?.message || "").toLowerCase();
+    if (!message.includes("already exists")) throw err;
+  });
+
+  const { error } = await supabase.storage
+    .from(bucket)
+    .upload(storagePath, buffer, {
+      contentType: file.mimetype,
+      upsert: false,
+    });
+
+  if (error) throw error;
+
+  return {
+    bucket,
+    storagePath,
+    fileUrl: publicUrlFor(bucket, storagePath),
+  };
+}
+
+async function deleteStorageObject(bucket, storagePath) {
+  if (!bucket || !storagePath) return;
+  const { error } = await supabase.storage.from(bucket).remove([storagePath]);
+  if (error) console.error("Delete storage object error:", error.message);
+}
+
+async function activeCourseIdsForStudent(studentId) {
+  if (!studentId) return [];
+  const { data, error } = await supabase
+    .from("enrollments")
+    .select("course_id")
+    .eq("student_id", studentId)
+    .eq("payment_status", "paid")
+    .eq("status", "active")
+    .or(`enrollment_expires_at.is.null,enrollment_expires_at.gt.${new Date().toISOString()}`);
+  if (error) throw error;
+  return (data || []).map((row) => row.course_id).filter(Boolean);
+}
+
 function extractYouTubeVideoId(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -91,7 +150,7 @@ async function deleteVideoById(req, res) {
   try {
     const { data: video, error: selError } = await supabase
       .from("videos")
-      .select("id,type,file_url")
+      .select("id,type,file_url,storage_bucket,storage_path")
       .eq("id", req.params.id)
       .maybeSingle();
 
@@ -99,7 +158,11 @@ async function deleteVideoById(req, res) {
     if (!video) return res.status(404).json({ error: "Video not found" });
 
     if (video.type === "file") {
-      removeLocalVideoFile(video.file_url);
+      if (video.storage_bucket && video.storage_path) {
+        await deleteStorageObject(video.storage_bucket, video.storage_path);
+      } else {
+        removeLocalVideoFile(video.file_url);
+      }
     }
 
     const { error: delError } = await supabase
@@ -123,12 +186,24 @@ router.get("/all", onlyAdmin, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("videos")
-      .select("id,title,type,youtube_video_id,file_url,order,created_at")
+      .select("id,title,type,youtube_video_id,file_url,course_id,storage_bucket,storage_path,order,created_at,courses(title)")
       .order("order", { ascending: true })
       .order("created_at", { ascending: false });
 
     if (error) throw error;
-    return res.json(data || []);
+    return res.json((data || []).map((v) => ({
+      id: v.id,
+      title: v.title,
+      type: v.type,
+      youtubeVideoId: v.youtube_video_id,
+      fileUrl: v.file_url,
+      courseId: v.course_id,
+      courseTitle: v.courses?.title || "",
+      storageBucket: v.storage_bucket,
+      storagePath: v.storage_path,
+      order: v.order,
+      createdAt: v.created_at,
+    })));
   } catch (err) {
     console.error("List videos error:", err);
     return res.status(500).json({ error: "Failed to list videos" });
@@ -140,7 +215,7 @@ router.get("/all", onlyAdmin, async (req, res) => {
 // -----------------
 router.post("/all", onlyAdmin, async (req, res) => {
   try {
-    const { title, youtubeVideoId, order } = req.body;
+    const { title, youtubeVideoId, order, courseId } = req.body;
     const cleanYouTubeVideoId = extractYouTubeVideoId(youtubeVideoId);
 
     if (!title || !cleanYouTubeVideoId) {
@@ -151,14 +226,24 @@ router.post("/all", onlyAdmin, async (req, res) => {
       .from("videos")
       .insert({
         title,
+        course_id: courseId || null,
         type: "youtube",
         youtube_video_id: cleanYouTubeVideoId,
         order: typeof order === "number" ? order : Number(order) || 0,
       })
-      .select("id,title,type,youtube_video_id,file_url,order,created_at")
+      .select("id,title,type,youtube_video_id,file_url,course_id,order,created_at")
       .single();
 
     if (error) throw error;
+    await supabase.from("notifications").insert({
+      title: "New video added",
+      message: title,
+      type: "video",
+      course_id: courseId || null,
+      target_role: "student",
+    }).then(({ error: notificationError }) => {
+      if (notificationError) console.error("Video notification error:", notificationError.message);
+    });
     return res.json({ success: true, video: data });
   } catch (err) {
     console.error("Create video error:", err);
@@ -175,7 +260,7 @@ router.post(
   upload.single("file"), // field name MUST be "file"
   async (req, res) => {
     try {
-      const { title, order } = req.body;
+      const { title, order, courseId } = req.body;
 
       if (!title) {
         return res.status(400).json({ error: "title is required" });
@@ -184,24 +269,47 @@ router.post(
         return res.status(400).json({ error: "video file is required" });
       }
 
-      const relativePath = path.join("uploads", "videos", req.file.filename)
-        .replace(/\\/g, "/");
-
-      const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
-      const fileUrl = `${baseUrl}/${relativePath}`;
+      let fileUrl = "";
+      let storageBucket = null;
+      let storagePath = null;
+      try {
+        const uploaded = await uploadFileToSupabaseStorage(req.file, "videos");
+        fileUrl = uploaded.fileUrl;
+        storageBucket = uploaded.bucket;
+        storagePath = uploaded.storagePath;
+        removeLocalVideoFile(`uploads/videos/${req.file.filename}`);
+      } catch (storageError) {
+        console.error("Supabase video upload failed; using local fallback:", storageError.message);
+        const relativePath = path.join("uploads", "videos", req.file.filename)
+          .replace(/\\/g, "/");
+        const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
+        fileUrl = `${baseUrl}/${relativePath}`;
+      }
 
       const { data, error } = await supabase
         .from("videos")
         .insert({
           title,
+          course_id: courseId || null,
           type: "file",
           file_url: fileUrl,
+          storage_bucket: storageBucket,
+          storage_path: storagePath,
           order: order ? Number(order) : 0,
         })
-        .select("id,title,type,youtube_video_id,file_url,order,created_at")
+        .select("id,title,type,youtube_video_id,file_url,course_id,storage_bucket,storage_path,order,created_at")
         .single();
 
       if (error) throw error;
+      await supabase.from("notifications").insert({
+        title: "New video uploaded",
+        message: title,
+        type: "video",
+        course_id: courseId || null,
+        target_role: "student",
+      }).then(({ error: notificationError }) => {
+        if (notificationError) console.error("Video upload notification error:", notificationError.message);
+      });
 
       return res.json({ success: true, video: data });
     } catch (err) {
@@ -224,11 +332,24 @@ router.delete("/:id", onlyAdmin, deleteVideoById);
 // -----------------
 router.get("/public", async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const studentId = req.query.studentId;
+    const courseIds = await activeCourseIdsForStudent(studentId);
+
+    let query = supabase
       .from("videos")
-      .select("id,title,type,youtube_video_id,file_url")
+      .select("id,title,type,youtube_video_id,file_url,course_id,courses(title)")
       .order("order", { ascending: true })
       .order("created_at", { ascending: false });
+
+    if (studentId) {
+      const allowed = ["course_id.is.null"];
+      if (courseIds.length) allowed.push(`course_id.in.(${courseIds.join(",")})`);
+      query = query.or(allowed.join(","));
+    } else {
+      query = query.is("course_id", null);
+    }
+
+    const { data, error } = await query;
 
     if (error) throw error;
 
@@ -238,6 +359,8 @@ router.get("/public", async (req, res) => {
       type: v.type,
       youtubeVideoId: extractYouTubeVideoId(v.youtube_video_id),
       fileUrl: v.file_url,
+      courseId: v.course_id,
+      courseTitle: v.courses?.title || "",
     }));
 
     return res.json(mapped);

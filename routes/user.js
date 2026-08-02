@@ -33,7 +33,7 @@ async function fetchUserById(userId) {
   }
   const { data, error } = await supabase
     .from("users")
-    .select("id,full_name,username,password_hash,role,created_at")
+    .select("id,full_name,username,password_hash,role,status,created_at")
     .eq("id", userId)
     .single();
 
@@ -99,7 +99,7 @@ router.get("/list", async (req, res) => {
   try {
     const { data: users, error: uErr } = await supabase
       .from("users")
-      .select("id,full_name,username,role,created_at")
+      .select("id,full_name,username,role,status,created_at")
       .order("created_at", { ascending: false });
 
     if (uErr) throw uErr;
@@ -124,6 +124,7 @@ router.get("/list", async (req, res) => {
           fullName: user.full_name,
           username: user.username,
           role: user.role || "student",
+          status: user.status || "active",
           createdAt: user.created_at,
           adminLevel: adminAccount
             ? getAdminLevel(adminAccount)
@@ -159,8 +160,9 @@ router.post("/", async (req, res) => {
         username,
         password_hash: await bcrypt.hash(password, 10),
         role: "student",
+        status: "active",
       })
-      .select("id,full_name,username,role,created_at")
+      .select("id,full_name,username,role,status,created_at")
       .single();
 
     if (error) throw error;
@@ -170,6 +172,7 @@ router.post("/", async (req, res) => {
       fullName: student.full_name,
       username: student.username,
       role: student.role || "student",
+      status: student.status || "active",
       createdAt: student.created_at,
     });
   } catch (err) {
@@ -306,7 +309,7 @@ router.patch("/:id/role", async (req, res) => {
 
       const { error: uErr } = await supabase
         .from("users")
-        .update({ role: "admin" })
+      .update({ role: "admin" })
         .eq("id", userId);
       if (uErr) throw uErr;
 
@@ -350,6 +353,46 @@ router.patch("/:id/role", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(err.status || 500).send(err.message || "Error updating role");
+  }
+});
+
+// PATCH /user/:id/status - block/unblock student account
+router.patch("/:id/status", async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const nextStatus = String(req.body.status || "").trim();
+    if (!["active", "blocked"].includes(nextStatus)) {
+      return res.status(400).send("Status must be active or blocked");
+    }
+
+    const user = await fetchUserById(userId);
+    if (!user) return res.status(404).send("User not found");
+
+    const linkedAdmin = await fetchAdminByUserOrUsername({ userId, username: user.username });
+    const targetIsAdmin = user.role === "admin" || Boolean(linkedAdmin);
+    if (targetIsAdmin && !isRealAdmin(req)) {
+      return res.status(403).send("Only real admins can block admin accounts");
+    }
+
+    const { data, error } = await supabase
+      .from("users")
+      .update({ status: nextStatus })
+      .eq("id", userId)
+      .select("id,full_name,username,role,status,created_at")
+      .single();
+    if (error) throw error;
+
+    res.json({
+      id: data.id,
+      fullName: data.full_name,
+      username: data.username,
+      role: data.role || "student",
+      status: data.status || "active",
+      createdAt: data.created_at,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(err.status || 500).send(err.message || "Error updating status");
   }
 });
 

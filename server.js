@@ -27,6 +27,9 @@ const liveClassRoutes = require("./routes/liveClassRoutes");
 const videoRoutes = require("./routes/video");
 const settingsRoutes = require("./routes/settings");
 const progressRoutes = require("./routes/progress");
+const materialRoutes = require("./routes/material");
+const dashboardRoutes = require("./routes/dashboard");
+const notificationRoutes = require("./routes/notification");
 
 const app    = express();
 const server = http.createServer(app);
@@ -102,6 +105,9 @@ app.use("/live-class", liveClassRoutes);
 app.use("/video", videoRoutes);
 app.use("/settings", settingsRoutes);
 app.use("/progress", progressRoutes);
+app.use("/material", materialRoutes);
+app.use("/dashboard", dashboardRoutes);
+app.use("/notification", notificationRoutes);
 
 
 app.get("/", (req, res) => {

@@ -21,6 +21,7 @@ function toUserResponse(user) {
     fullName: user.fullName,
     username: user.username,
     role: user.role || "student",
+    status: user.status || "active",
   };
 }
 
@@ -201,11 +202,12 @@ router.post("/login", async (req, res) => {
 
     const { data: userRow, error } = await supabase
       .from('users')
-      .select('id, full_name, username, password_hash, role')
+      .select('id, full_name, username, password_hash, role, status')
       .eq('username', username)
       .single();
 
     if (error || !userRow) return res.status(400).send("Invalid credentials");
+    if (userRow.status === "blocked") return res.status(403).send("Account is blocked");
 
     const ok = await bcrypt.compare(password, userRow.password_hash);
     if (!ok) return res.status(400).send("Invalid credentials");
@@ -215,6 +217,7 @@ router.post("/login", async (req, res) => {
       fullName: userRow.full_name,
       username: userRow.username,
       role: userRow.role,
+      status: userRow.status,
     };
 
     res.json({
@@ -231,7 +234,7 @@ router.get("/me", requireUser, async (req, res) => {
   try {
     const { data: userRow, error } = await supabase
       .from('users')
-      .select('id, full_name, username, role')
+      .select('id, full_name, username, role, status')
       .eq('id', req.user._id)
       .single();
 
@@ -242,6 +245,7 @@ router.get("/me", requireUser, async (req, res) => {
       fullName: userRow.full_name,
       username: userRow.username,
       role: userRow.role,
+      status: userRow.status,
     };
 
     res.json({ user: toUserResponse(user) });

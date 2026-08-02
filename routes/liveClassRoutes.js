@@ -40,6 +40,7 @@ async function studentHasLiveAccess(studentId) {
     .eq("student_id", studentId)
     .eq("payment_status", "paid")
     .eq("status", "active")
+    .or(`enrollment_expires_at.is.null,enrollment_expires_at.gt.${new Date().toISOString()}`)
     .limit(1)
     .maybeSingle();
   if (error) throw error;
@@ -116,6 +117,15 @@ router.post("/admin/start-internal", onlyAdmin, async (req, res) => {
       internal_room_code: existing?.internal_room_code || makeRoomCode(),
       internal_live_started_at: new Date().toISOString(),
       internal_live_ended_at: null,
+    });
+    await supabase.from("notifications").insert({
+      title: "Live class started",
+      message: live.title || "Teacher is live now.",
+      type: "live",
+      course_id: null,
+      target_role: "student",
+    }).then(({ error: notificationError }) => {
+      if (notificationError) console.error("Live notification error:", notificationError.message);
     });
     res.json({ success: true, liveClass: toLiveClass(live), iceServers: getIceServers() });
   } catch (err) {
