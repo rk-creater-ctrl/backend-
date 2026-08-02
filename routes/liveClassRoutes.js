@@ -277,10 +277,16 @@ router.get("/internal/viewer", async (req, res) => {
     .chat { min-height: 260px; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; overflow: hidden; background: rgba(7,17,31,.88); display: flex; flex-direction: column; box-shadow: 0 18px 40px rgba(0,0,0,.22); }
     .chat-head { padding: 12px; border-bottom: 1px solid #1f2937; font-weight: 800; display: flex; justify-content: space-between; align-items: center; }
     .chat-head span { color: #94a3b8; font-size: 11px; font-weight: 700; }
-    .messages { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-    .msg { padding: 9px 10px; border-radius: 14px; background: #0f172a; border: 1px solid #1f2937; font-size: 13px; line-height: 1.35; }
-    .msg.teacher { background: rgba(8,47,73,.72); border-color: rgba(56,189,248,.24); }
-    .msg strong { color: #38bdf8; display: block; margin-bottom: 2px; font-size: 12px; }
+    .messages { flex: 1; overflow-y: auto; padding: 13px; display: flex; flex-direction: column; gap: 14px; }
+    .empty-chat { color: #94a3b8; font-size: 13px; padding: 16px; border: 1px dashed #334155; border-radius: 14px; text-align: center; background: rgba(2,6,23,.48); }
+    .msg { display: grid; grid-template-columns: 36px 1fr; gap: 10px; font-size: 13px; line-height: 1.38; }
+    .avatar { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: linear-gradient(135deg,#334155,#0f172a); color: #e5e7eb; font-size: 12px; font-weight: 900; }
+    .msg.teacher .avatar { background: linear-gradient(135deg,#38bdf8,#22c55e); color: #03111f; }
+    .meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 3px; }
+    .name { color: #e5e7eb; font-weight: 800; }
+    .time { color: #64748b; font-size: 11px; }
+    .teacher-badge { border-radius: 999px; background: #38bdf8; color: #03111f; padding: 2px 7px; font-size: 10px; font-weight: 900; }
+    .text { color: #d1d5db; word-break: break-word; }
     .chat-form { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #1f2937; background: rgba(2,6,23,.64); }
     input { flex: 1; min-width: 0; border-radius: 999px; border: 1px solid #334155; background: #020617; color: #e5e7eb; padding: 11px 12px; }
     .send { flex: 0 0 auto; padding-inline: 14px; }
@@ -312,8 +318,10 @@ router.get("/internal/viewer", async (req, res) => {
         </div>
       </section>
       <section class="chat">
-        <div class="chat-head">Class Chat <span>Ask doubts live</span></div>
-        <div id="messages" class="messages"></div>
+        <div class="chat-head">Live Comments <span>Ask doubts live</span></div>
+        <div id="messages" class="messages">
+          <div id="emptyChat" class="empty-chat">No comments yet. Start the discussion with your teacher.</div>
+        </div>
         <form id="chatForm" class="chat-form">
           <input id="chatInput" placeholder="Type your message..." autocomplete="off" />
           <button class="send" type="submit">Send</button>
@@ -341,13 +349,40 @@ router.get("/internal/viewer", async (req, res) => {
       statusEl.textContent = text;
     }
 
+    function getInitials(name) {
+      return String(name || "Class")
+        .trim()
+        .split(/\\s+/)
+        .slice(0, 2)
+        .map((part) => part[0])
+        .join("")
+        .toUpperCase() || "C";
+    }
+
+    function formatMessageTime(value) {
+      try {
+        return new Date(value || Date.now()).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit"
+        });
+      } catch {
+        return "now";
+      }
+    }
+
     function addMessage(message) {
+      const emptyChat = document.getElementById("emptyChat");
+      if (emptyChat) emptyChat.remove();
       const item = document.createElement("div");
       item.className = "msg";
       if (message.role === "broadcaster") item.classList.add("teacher");
-      item.innerHTML = "<strong></strong><span></span>";
-      item.querySelector("strong").textContent = message.name || "Class";
-      item.querySelector("span").textContent = message.text || "";
+      item.innerHTML = '<div class="avatar"></div><div><div class="meta"><span class="name"></span><span class="teacher-badge">TEACHER</span><span class="time"></span></div><div class="text"></div></div>';
+      item.querySelector(".avatar").textContent = getInitials(message.name);
+      item.querySelector(".name").textContent = message.name || "Class";
+      item.querySelector(".time").textContent = formatMessageTime(message.createdAt);
+      item.querySelector(".text").textContent = message.text || "";
+      const badge = item.querySelector(".teacher-badge");
+      if (message.role !== "broadcaster") badge.remove();
       messagesEl.appendChild(item);
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
