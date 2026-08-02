@@ -8,10 +8,14 @@ const enrollmentSelect =
   "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,student_address,aadhar_number,mobile_number,enrollment_expires_at,offline_address,offline_teacher_name,offline_phone,offline_message,created_at,users(full_name,username),courses(title)";
 const legacyEnrollmentSelect =
   "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,offline_address,offline_teacher_name,offline_phone,offline_message,created_at,users(full_name,username),courses(title)";
+const safeEnrollmentSelect =
+  "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at";
 const myFeesSelect =
   "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,student_address,aadhar_number,mobile_number,enrollment_expires_at,created_at,courses(title,price,description,cover_image_url,category)";
 const legacyMyFeesSelect =
   "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at,courses(title,price,description,cover_image_url,category)";
+const safeMyFeesSelect =
+  "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const validId = (id) => UUID_PATTERN.test(String(id || ""));
 
@@ -66,6 +70,40 @@ async function selectEnrollmentsWithFallback(selectClause, fallbackClause, apply
   let fallbackQuery = supabase.from("enrollments").select(fallbackClause);
   fallbackQuery = applyQuery(fallbackQuery);
   return fallbackQuery;
+}
+
+async function fetchUsersByIds(ids = []) {
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  if (!uniqueIds.length) return new Map();
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("id,full_name,username")
+    .in("id", uniqueIds);
+
+  if (error) {
+    console.error("Enrollment user lookup fallback failed:", error.message);
+    return new Map();
+  }
+
+  return new Map((data || []).map((user) => [user.id, user]));
+}
+
+async function fetchCoursesByIds(ids = [], courseSelect = "id,title") {
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  if (!uniqueIds.length) return new Map();
+
+  const { data, error } = await supabase
+    .from("courses")
+    .select(courseSelect)
+    .in("id", uniqueIds);
+
+  if (error) {
+    console.error("Enrollment course lookup fallback failed:", error.message);
+    return new Map();
+  }
+
+  return new Map((data || []).map((course) => [course.id, course]));
 }
 
 // Student creates enrollment (offline OR online placeholder)
@@ -179,23 +217,40 @@ router.post("/", requireSelfOrAdmin(), async (req, res) => {
 // ADMIN: list enrollments
 router.get("/all", onlyAdmin, async (req, res) => {
   try {
-    const { data, error } = await selectEnrollmentsWithFallback(
+    let { data, error } = await selectEnrollmentsWithFallback(
       enrollmentSelect,
       legacyEnrollmentSelect,
       (query) => query.order("created_at", { ascending: false })
     );
 
+    if (error) {
+      console.warn("Enrollment list used safe fallback:", error.message);
+      const safeResult = await supabase
+        .from("enrollments")
+        .select(safeEnrollmentSelect)
+        .order("created_at", { ascending: false });
+      data = safeResult.data;
+      error = safeResult.error;
+    }
+
     if (error) throw error;
+
+    const usersById = await fetchUsersByIds((data || []).map((row) => row.student_id));
+    const coursesById = await fetchCoursesByIds((data || []).map((row) => row.course_id));
 
     // Map to old-ish nested populate shape: { studentId: {..}, courseId: {title,..} }
     res.json(
       (data || []).map((row) => ({
         _id: row.id,
-        studentId: row.users
-          ? { fullName: row.users.full_name, username: row.users.username, _id: row.student_id }
+        studentId: row.users || usersById.get(row.student_id)
+          ? {
+              fullName: (row.users || usersById.get(row.student_id))?.full_name,
+              username: (row.users || usersById.get(row.student_id))?.username,
+              _id: row.student_id,
+            }
           : row.student_id,
-        courseId: row.courses
-          ? { title: row.courses.title, _id: row.course_id }
+        courseId: row.courses || coursesById.get(row.course_id)
+          ? { title: (row.courses || coursesById.get(row.course_id))?.title, _id: row.course_id }
           : row.course_id,
         mode: row.mode,
         paymentType: row.payment_type,
@@ -314,19 +369,35 @@ router.get("/my-fees/:studentId", requireSelfOrAdmin(), async (req, res) => {
     const { studentId } = req.params;
     if (!validId(studentId)) return res.status(400).send("Invalid student ID");
 
-    const { data, error } = await selectEnrollmentsWithFallback(
+    let { data, error } = await selectEnrollmentsWithFallback(
       myFeesSelect,
       legacyMyFeesSelect,
       (query) => query.eq("student_id", studentId).order("created_at", { ascending: false })
     );
 
+    if (error) {
+      console.warn("My fees used safe fallback:", error.message);
+      const safeResult = await supabase
+        .from("enrollments")
+        .select(safeMyFeesSelect)
+        .eq("student_id", studentId)
+        .order("created_at", { ascending: false });
+      data = safeResult.data;
+      error = safeResult.error;
+    }
+
     if (error) throw error;
+
+    const coursesById = await fetchCoursesByIds(
+      (data || []).map((row) => row.course_id),
+      "id,title,price,description,cover_image_url,category"
+    );
 
     res.json(
       (data || []).map((row) => ({
         _id: row.id,
         studentId: row.student_id,
-        courseId: row.courses,
+        courseId: row.courses || coursesById.get(row.course_id) || row.course_id,
         mode: row.mode,
         paymentType: row.payment_type,
         paymentStatus: row.payment_status,
