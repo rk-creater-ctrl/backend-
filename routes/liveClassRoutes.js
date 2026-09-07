@@ -489,7 +489,7 @@ router.get("/internal/viewer", async (req, res) => {
     <main class="stage">
       <section class="classroom">
         <div class="video-shell">
-          <video id="remoteVideo" autoplay playsinline></video>
+          <video id="remoteVideo" autoplay muted playsinline></video>
           <div class="video-label">Teacher Stream</div>
         </div>
         <div class="controls">
@@ -525,6 +525,9 @@ router.get("/internal/viewer", async (req, res) => {
     const studentName = ${safeStudentName};
     const statusEl = document.getElementById("status");
     const remoteVideo = document.getElementById("remoteVideo");
+    // Muted autoplay is permitted by Android WebView. The Flutter audio
+    // control lets the student opt in to sound after the video appears.
+    remoteVideo.muted = true;
     const videoShell = document.querySelector(".video-shell");
     const playButton = document.getElementById("playButton");
     const fullscreenVideoButton = document.getElementById("fullscreenVideoButton");
