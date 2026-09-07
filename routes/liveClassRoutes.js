@@ -691,7 +691,12 @@ router.get("/internal/viewer", async (req, res) => {
     }
 
     const socket = io({
-      transports: ["websocket", "polling"],
+      // Render can reject an initial WebSocket handshake while an instance is
+      // waking. Start with Socket.IO polling, then upgrade to WebSocket when
+      // available. WebRTC media still travels directly between teacher/student.
+      transports: ["polling", "websocket"],
+      upgrade: true,
+      tryAllTransports: true,
       reconnectionAttempts: 4,
       timeout: 12000
     });
