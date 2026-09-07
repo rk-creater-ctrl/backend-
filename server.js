@@ -142,6 +142,10 @@ function normalizeOrigin(value) {
 
 const allowedOrigins = [
   process.env.FRONTEND_URLS,
+  // The Flutter WebView loads the student viewer from this backend URL, then
+  // opens Socket.IO from that same origin. Render provides RENDER_EXTERNAL_URL.
+  process.env.BACKEND_URL,
+  process.env.RENDER_EXTERNAL_URL,
 ]
   .filter(Boolean)
   .join(",")
