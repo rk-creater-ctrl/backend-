@@ -9,10 +9,90 @@ const { supabase } = require("../supabaseClient");
 const { onlyAdmin, getAdminLevel } = require("../middleware/authRole");
 
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_key";
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_ALGORITHM = "HS256";
+const MAX_USERNAME_LENGTH = 64;
+const MAX_FULL_NAME_LENGTH = 120;
+const MAX_PASSWORD_LENGTH = 128;
 
 function cleanUsername(username) {
-  return String(username || "").trim();
+  return username.trim();
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOnlyFields(body, allowedFields) {
+  return Object.keys(body).every((key) => allowedFields.includes(key));
+}
+
+function invalidInput(res, message) {
+  return res.status(400).json({ message });
+}
+
+function unexpectedAuthError(res, context, error) {
+  console.error(context, { name: error?.name, code: error?.code });
+  return res.status(500).json({ message: "Unable to process authentication request" });
+}
+
+function validateCredentials(body, { allowFullName = false } = {}) {
+  const allowedFields = allowFullName ? ["username", "fullName", "password"] : ["username", "password"];
+  if (!isPlainObject(body) || !hasOnlyFields(body, allowedFields)) {
+    return { error: "Invalid request body" };
+  }
+  if (typeof body.username !== "string" || typeof body.password !== "string") {
+    return { error: "Username and password must be strings" };
+  }
+
+  const username = cleanUsername(body.username);
+  if (!username || username.length > MAX_USERNAME_LENGTH) {
+    return { error: "Username must be between 1 and 64 characters" };
+  }
+  if (!body.password || body.password.length > MAX_PASSWORD_LENGTH) {
+    return { error: "Password must be between 1 and 128 characters" };
+  }
+
+  const fullName = allowFullName
+    ? (body.fullName === undefined || body.fullName === "" ? username : typeof body.fullName === "string" ? body.fullName.trim() : null)
+    : undefined;
+  if (allowFullName && (!fullName || fullName.length > MAX_FULL_NAME_LENGTH)) {
+    return { error: "Full name must be between 1 and 120 characters" };
+  }
+
+  return { username, password: body.password, fullName };
+}
+
+function validateProfileUpdate(body) {
+  if (!isPlainObject(body) || !hasOnlyFields(body, ["username", "fullName"])) {
+    return { error: "Invalid request body" };
+  }
+  if (body.username !== undefined && typeof body.username !== "string") {
+    return { error: "Username must be a string" };
+  }
+  if (body.fullName !== undefined && typeof body.fullName !== "string") {
+    return { error: "Full name must be a string" };
+  }
+  if (typeof body.username === "string" && body.username.trim().length > MAX_USERNAME_LENGTH) {
+    return { error: "Username must be at most 64 characters" };
+  }
+  if (typeof body.fullName === "string" && body.fullName.trim().length > MAX_FULL_NAME_LENGTH) {
+    return { error: "Full name must be at most 120 characters" };
+  }
+  return {};
+}
+
+function validatePasswordChange(body) {
+  if (!isPlainObject(body) || !hasOnlyFields(body, ["currentPassword", "newPassword"])) {
+    return { error: "Invalid request body" };
+  }
+  if (typeof body.currentPassword !== "string" || typeof body.newPassword !== "string") {
+    return { error: "Passwords must be strings" };
+  }
+  if (!body.currentPassword || !body.newPassword || body.currentPassword.length > MAX_PASSWORD_LENGTH || body.newPassword.length > MAX_PASSWORD_LENGTH) {
+    return { error: "Passwords must be between 1 and 128 characters" };
+  }
+  return {};
 }
 
 function toUserResponse(user) {
@@ -38,7 +118,7 @@ function signUser(user) {
   return jwt.sign(
     { _id: user._id, type: "user", role: user.role || "student" },
     JWT_SECRET,
-    { expiresIn: "7d" }
+    { expiresIn: "7d", algorithm: JWT_ALGORITHM }
   );
 }
 
@@ -46,7 +126,7 @@ function signAdmin(admin) {
   return jwt.sign(
     { _id: admin._id, type: "admin", level: getAdminLevel(admin) },
     JWT_SECRET,
-    { expiresIn: "7d" }
+    { expiresIn: "7d", algorithm: JWT_ALGORITHM }
   );
 }
 
@@ -70,7 +150,7 @@ async function usernameExists(username) {
 
 function requireUser(req, res, next) {
   if (!req.user || req.user.type !== "user") {
-    return res.status(401).send("Login required");
+    return res.status(401).json({ message: "Login required" });
   }
   next();
 }
@@ -143,13 +223,9 @@ async function usernameAvailableForUser(username, user, linkedAdmin) {
 // Public registration. Every self-registered account starts as a student.
 router.post("/register", async (req, res) => {
   try {
-    const username = cleanUsername(req.body.username);
-    const fullName = String(req.body.fullName || username).trim();
-    const { password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).send("Username and password required");
-    }
+    const input = validateCredentials(req.body, { allowFullName: true });
+    if (input.error) return invalidInput(res, input.error);
+    const { username, fullName, password } = input;
 
     if (await usernameExists(username)) {
       return res.status(400).send("Username already exists");
@@ -185,7 +261,7 @@ router.post("/register", async (req, res) => {
       user: toUserResponse(user),
     });
   } catch (e) {
-    res.status(400).send("Error: " + e.message);
+    return unexpectedAuthError(res, "Student registration error", e);
   }
 });
 
@@ -193,12 +269,9 @@ router.post("/register", async (req, res) => {
 // students/admin-users login to the student app
 router.post("/login", async (req, res) => {
   try {
-    const username = cleanUsername(req.body.username);
-    const { password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).send("Username and password required");
-    }
+    const input = validateCredentials(req.body);
+    if (input.error) return invalidInput(res, input.error);
+    const { username, password } = input;
 
     const { data: userRow, error } = await supabase
       .from('users')
@@ -225,7 +298,7 @@ router.post("/login", async (req, res) => {
       user: toUserResponse(user),
     });
   } catch (e) {
-    res.status(400).send("Error: " + e.message);
+    return unexpectedAuthError(res, "Student login error", e);
   }
 });
 
@@ -250,13 +323,15 @@ router.get("/me", requireUser, async (req, res) => {
 
     res.json({ user: toUserResponse(user) });
   } catch (e) {
-    res.status(400).send("Error: " + e.message);
+    return unexpectedAuthError(res, "Student profile lookup error", e);
   }
 });
 
 
 router.put("/me", requireUser, async (req, res) => {
   try {
+    const input = validateProfileUpdate(req.body);
+    if (input.error) return invalidInput(res, input.error);
     const { data: userRow, error } = await supabase
       .from('users')
       .select('id, full_name, username, role')
@@ -308,13 +383,15 @@ router.put("/me", requireUser, async (req, res) => {
 
     res.json({ user: toUserResponse(newUser) });
   } catch (e) {
-    res.status(400).send("Error: " + e.message);
+    return unexpectedAuthError(res, "Student profile update error", e);
   }
 });
 
 
 router.put("/me/password", requireUser, async (req, res) => {
   try {
+    const input = validatePasswordChange(req.body);
+    if (input.error) return invalidInput(res, input.error);
     const { data: userRow, error } = await supabase
       .from('users')
       .select('id, full_name, username, role, password_hash')
@@ -357,7 +434,7 @@ router.put("/me/password", requireUser, async (req, res) => {
 
     res.json({ message: "Password updated" });
   } catch (e) {
-    res.status(400).send("Error: " + e.message);
+    return unexpectedAuthError(res, "Student password update error", e);
   }
 });
 
@@ -366,12 +443,9 @@ router.put("/me/password", requireUser, async (req, res) => {
 
 router.post("/admin/login", async (req, res) => {
   try {
-    const username = cleanUsername(req.body.username);
-    const { password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).send("Username and password required");
-    }
+    const input = validateCredentials(req.body);
+    if (input.error) return invalidInput(res, input.error);
+    const { username, password } = input;
 
     const { data: adminRow, error } = await supabase
       .from('admins')
@@ -399,8 +473,7 @@ router.post("/admin/login", async (req, res) => {
       admin: toAdminResponse(admin),
     });
   } catch (e) {
-    console.error("Admin login error:", e);
-    res.status(400).send("Error: " + e.message);
+    return unexpectedAuthError(res, "Admin login error", e);
   }
 });
 
@@ -412,13 +485,9 @@ router.get("/admin/me", onlyAdmin, (req, res) => {
 
 router.post("/admin/create-user", onlyAdmin, async (req, res) => {
   try {
-    const username = cleanUsername(req.body.username);
-    const fullName = String(req.body.fullName || username).trim();
-    const { password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).send("Username and password required");
-    }
+    const input = validateCredentials(req.body, { allowFullName: true });
+    if (input.error) return invalidInput(res, input.error);
+    const { username, fullName, password } = input;
 
     if (await usernameExists(username)) {
       return res.status(400).send("Username already exists");
@@ -450,7 +519,7 @@ router.post("/admin/create-user", onlyAdmin, async (req, res) => {
 
     res.json({ message: "User created", user: toUserResponse(user) });
   } catch (e) {
-    res.status(400).send("Error: " + e.message);
+    return unexpectedAuthError(res, "Admin user creation error", e);
   }
 });
 

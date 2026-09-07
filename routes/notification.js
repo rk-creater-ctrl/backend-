@@ -71,7 +71,7 @@ router.post("/device-token", requireSelfOrAdmin("userId"), async (req, res) => {
   try {
     const token = String(req.body.token || "").trim();
     const platform = String(req.body.platform || "").trim();
-    const userId = req.body.userId;
+    const userId = req.user?.type === "user" ? req.user._id : req.body.userId;
     if (!token || !userId) return res.status(400).json({ error: "token and userId are required" });
 
     const { error } = await supabase

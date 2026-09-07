@@ -5,6 +5,14 @@ const path    = require("path");
 const fs      = require("fs");
 const { onlyAdmin } = require("../middleware/authRole");
 
+const COVER_IMAGE_TYPES = {
+  ".jpg": ["image/jpeg"],
+  ".jpeg": ["image/jpeg"],
+  ".png": ["image/png"],
+  ".webp": ["image/webp"],
+  ".gif": ["image/gif"],
+};
+
 const router = express.Router();
 const uploadDir = path.join(__dirname, "..", "uploads");
 
@@ -17,8 +25,8 @@ const storage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || ".jpg";
-    cb(null, Date.now() + ext);
+    const ext = path.extname(String(file.originalname || "")).toLowerCase();
+    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
   }
 });
 
@@ -26,8 +34,11 @@ const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) {
-      return cb(new Error("Only JPEG, PNG, WebP, or GIF images are allowed"));
+    const ext = path.extname(String(file.originalname || "")).toLowerCase();
+    if (!COVER_IMAGE_TYPES[ext]?.includes(file.mimetype)) {
+      const error = new Error("Unsupported cover image file type");
+      error.code = "INVALID_FILE_TYPE";
+      return cb(error);
     }
     cb(null, true);
   },

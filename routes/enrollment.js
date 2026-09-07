@@ -11,13 +11,55 @@ const legacyEnrollmentSelect =
 const safeEnrollmentSelect =
   "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at";
 const myFeesSelect =
-  "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,student_address,aadhar_number,mobile_number,enrollment_expires_at,created_at,courses(title,price,description,cover_image_url,category)";
+  "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,student_address,aadhar_number,mobile_number,enrollment_expires_at,created_at,courses(id,title,price,description,cover_image_url,category)";
 const legacyMyFeesSelect =
-  "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at,courses(title,price,description,cover_image_url,category)";
+  "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at,courses(id,title,price,description,cover_image_url,category)";
 const safeMyFeesSelect =
   "id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const validId = (id) => UUID_PATTERN.test(String(id || ""));
+const validId = (id) => typeof id === "string" && UUID_PATTERN.test(id);
+const enrollmentFields = ["studentId", "courseId", "mode", "paymentType", "offlineDetails"];
+const offlineDetailFields = [
+  "address", "studentAddress", "aadharNumber", "aadhaarNumber",
+  "mobileNumber", "phone", "teacherName", "message",
+];
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function invalidInput(res, message) {
+  return res.status(400).json({ message });
+}
+
+function validateEnrollmentInput(body, studentId) {
+  if (!isPlainObject(body) || !Object.keys(body).every((key) => enrollmentFields.includes(key))) {
+    return { error: "Invalid enrollment request" };
+  }
+  if (!validId(studentId) || !validId(body.courseId)) {
+    return { error: "Invalid student or course ID" };
+  }
+  if (body.studentId !== undefined && !validId(body.studentId)) {
+    return { error: "Invalid student or course ID" };
+  }
+  if (!["online", "offline"].includes(body.mode) || !["online", "offline"].includes(body.paymentType)) {
+    return { error: "Invalid enrollment mode or payment type" };
+  }
+  if (!isPlainObject(body.offlineDetails) || !Object.keys(body.offlineDetails).every((key) => offlineDetailFields.includes(key))) {
+    return { error: "Invalid student registration details" };
+  }
+  if (Object.values(body.offlineDetails).some((value) => value !== undefined && typeof value !== "string")) {
+    return { error: "Student registration details must be strings" };
+  }
+
+  const details = buildRegistrationDetails(body.offlineDetails);
+  if (!details.address || details.address.length > 500 || details.aadharNumber.length !== 12 ||
+      details.mobileNumber.length !== 10 || details.teacherName.length > 120 || details.message.length > 1000) {
+    return { error: "Invalid student registration details" };
+  }
+
+  return { courseId: body.courseId, mode: body.mode, paymentType: body.paymentType, details };
+}
 
 function emitEnrollmentChange(req, action, enrollment) {
   req.app.get("io")?.emit("enrollment:changed", { action, enrollment });
@@ -25,9 +67,11 @@ function emitEnrollmentChange(req, action, enrollment) {
 
 function enrollmentError(res, message, err) {
   console.error(message, err);
-  const payload = { message };
-  if (process.env.NODE_ENV !== "production") payload.detail = err?.message || message;
-  res.status(500).json(payload);
+  res.status(500).json({ message });
+}
+
+function isEnrollmentConflict(error) {
+  return error?.code === "23505" || String(error?.message || "").toLowerCase().includes("enrollments_one_current_per_course_idx");
 }
 
 function cleanDigits(value) {
@@ -109,27 +153,10 @@ async function fetchCoursesByIds(ids = [], courseSelect = "id,title") {
 // Student creates enrollment (offline OR online placeholder)
 router.post("/", requireSelfOrAdmin(), async (req, res) => {
   try {
-    const { studentId, courseId, mode, paymentType, offlineDetails } = req.body;
-    if (!validId(studentId) || !validId(courseId)) {
-      return res.status(400).send("Invalid student or course ID");
-    }
-    if (!["online", "offline"].includes(mode) || !["online", "offline"].includes(paymentType)) {
-      return res.status(400).send("Invalid enrollment mode or payment type");
-    }
-    if (!offlineDetails || typeof offlineDetails !== "object" || Array.isArray(offlineDetails)) {
-      return res.status(400).send("Student registration details are required");
-    }
-
-    const registrationDetails = buildRegistrationDetails(offlineDetails);
-    if (
-      !registrationDetails.address ||
-      registrationDetails.aadharNumber.length !== 12 ||
-      registrationDetails.mobileNumber.length !== 10
-    ) {
-      return res
-        .status(400)
-        .send("Address, 12-digit Aadhaar number and 10-digit mobile number are required");
-    }
+    const studentId = req.user?.type === "user" ? req.user._id : req.body?.studentId;
+    const input = validateEnrollmentInput(req.body, studentId);
+    if (input.error) return invalidInput(res, input.error);
+    const { courseId, mode, paymentType, details: registrationDetails } = input;
 
     const { data: course, error: cErr } = await supabase
       .from("courses")
@@ -142,13 +169,14 @@ router.post("/", requireSelfOrAdmin(), async (req, res) => {
 
     const { data: existing, error: existingError } = await supabase
       .from("enrollments")
-      .select("id")
+      .select("id,status")
       .eq("student_id", studentId)
       .eq("course_id", courseId)
+      .neq("status", "rejected")
       .limit(1)
       .maybeSingle();
     if (existingError) throw existingError;
-    if (existing) return res.status(409).send("Already enrolled in this course");
+    if (existing) return res.status(409).json({ message: "An application or enrollment already exists for this course" });
 
     const amount = Number(course.price || 0);
 
@@ -161,7 +189,6 @@ router.post("/", requireSelfOrAdmin(), async (req, res) => {
         status: "pending",
         amount,
         offline_details: {
-          ...offlineDetails,
           address: registrationDetails.address,
           studentAddress: registrationDetails.address,
           aadharNumber: registrationDetails.aadharNumber,
@@ -202,6 +229,9 @@ router.post("/", requireSelfOrAdmin(), async (req, res) => {
       eErr = legacyResult.error;
     }
 
+    if (isEnrollmentConflict(eErr)) {
+      return res.status(409).json({ message: "An application or enrollment already exists for this course" });
+    }
     if (eErr) throw eErr;
 
     res.json({
@@ -210,7 +240,8 @@ router.post("/", requireSelfOrAdmin(), async (req, res) => {
     });
     emitEnrollmentChange(req, "created", { _id: enrollment.id });
   } catch (e) {
-    res.status(400).send("Error: " + e.message);
+    console.error("Enrollment creation error:", { name: e?.name, code: e?.code });
+    res.status(500).json({ message: "Failed to create enrollment request" });
   }
 });
 
@@ -288,6 +319,7 @@ router.post("/mark-paid/:id", onlyAdmin, async (req, res) => {
       .from("enrollments")
       .update(updatePayload)
       .eq("id", req.params.id)
+      .eq("status", "pending")
       .select("id,payment_status,status,student_id,course_id,enrollment_expires_at,courses(title)")
       .maybeSingle();
 
@@ -297,6 +329,7 @@ router.post("/mark-paid/:id", onlyAdmin, async (req, res) => {
         .from("enrollments")
         .update({ payment_status: "paid", status: "active" })
         .eq("id", req.params.id)
+        .eq("status", "pending")
         .select("id,payment_status,status,student_id,course_id,courses(title)")
         .maybeSingle();
       data = legacyResult.data;
@@ -304,7 +337,13 @@ router.post("/mark-paid/:id", onlyAdmin, async (req, res) => {
     }
 
     if (error) throw error;
-    if (!data) return res.status(404).send("Enrollment not found");
+    if (!data) {
+      const { data: existing, error: existingError } = await supabase
+        .from("enrollments").select("id").eq("id", req.params.id).maybeSingle();
+      if (existingError) throw existingError;
+      if (!existing) return res.status(404).send("Enrollment not found");
+      return res.status(409).json({ message: "Only pending enrollments can be activated" });
+    }
     await supabase
       .from("notifications")
       .insert({
@@ -326,6 +365,46 @@ router.post("/mark-paid/:id", onlyAdmin, async (req, res) => {
   }
 });
 
+// ADMIN: reject a pending application. Rejected rows remain for history/reapplication.
+router.post("/reject/:id", onlyAdmin, async (req, res) => {
+  try {
+    if (!validId(req.params.id)) return res.status(400).send("Invalid enrollment ID");
+    const { data, error } = await supabase
+      .from("enrollments")
+      .update({ status: "rejected" })
+      .eq("id", req.params.id)
+      .eq("status", "pending")
+      .select("id,status,student_id,course_id")
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(409).json({ message: "Only pending enrollments can be rejected" });
+    emitEnrollmentChange(req, "updated", data);
+    return res.json({ message: "Enrollment rejected", enrollment: data });
+  } catch (err) {
+    enrollmentError(res, "Failed to reject enrollment", err);
+  }
+});
+
+// ADMIN: complete an active enrollment while retaining its payment history.
+router.post("/complete/:id", onlyAdmin, async (req, res) => {
+  try {
+    if (!validId(req.params.id)) return res.status(400).send("Invalid enrollment ID");
+    const { data, error } = await supabase
+      .from("enrollments")
+      .update({ status: "completed" })
+      .eq("id", req.params.id)
+      .eq("status", "active")
+      .select("id,status,payment_status,student_id,course_id")
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(409).json({ message: "Only active enrollments can be completed" });
+    emitEnrollmentChange(req, "updated", data);
+    return res.json({ message: "Course marked as completed", enrollment: data });
+  } catch (err) {
+    enrollmentError(res, "Failed to complete enrollment", err);
+  }
+});
+
 // ADMIN: mark as unpaid again
 router.post("/mark-unpaid/:id", onlyAdmin, async (req, res) => {
   try {
@@ -334,11 +413,12 @@ router.post("/mark-unpaid/:id", onlyAdmin, async (req, res) => {
       .from("enrollments")
       .update({ payment_status: "unpaid", status: "pending" })
       .eq("id", req.params.id)
+      .eq("status", "active")
       .select("id,payment_status,status")
       .maybeSingle();
 
     if (error) throw error;
-    if (!data) return res.status(404).send("Enrollment not found");
+    if (!data) return res.status(409).json({ message: "Only active enrollments can be returned to pending" });
     emitEnrollmentChange(req, "updated", data);
     res.send("Enrollment marked as unpaid");
   } catch (err) {

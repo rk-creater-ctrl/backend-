@@ -5,6 +5,16 @@ const fs = require("fs");
 const { supabase } = require("../supabaseClient");
 const { onlyAdmin, requireSelfOrAdmin } = require("../middleware/authRole");
 
+const MATERIAL_FILE_TYPES = {
+  ".pdf": ["application/pdf"],
+  ".jpg": ["image/jpeg"],
+  ".jpeg": ["image/jpeg"],
+  ".png": ["image/png"],
+  ".doc": ["application/msword"],
+  ".docx": ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+};
+const SIGNED_URL_EXPIRES_IN = 60 * 60;
+
 const router = express.Router();
 const uploadDir = path.join(__dirname, "..", "uploads", "materials");
 
@@ -16,22 +26,21 @@ const upload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => cb(null, uploadDir),
     filename: (req, file, cb) => {
-      const ext = path.extname(file.originalname) || ".pdf";
-      const base = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9._-]+/g, "-");
+      const ext = path.extname(String(file.originalname || "")).toLowerCase();
+      const base = path.basename(String(file.originalname || ""), ext)
+        .replace(/[^a-zA-Z0-9._-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 120) || "material";
       cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}-${base}${ext}`);
     },
   }),
   limits: { fileSize: 1024 * 1024 * 50 },
   fileFilter: (req, file, cb) => {
-    const allowed = [
-      "application/pdf",
-      "image/jpeg",
-      "image/png",
-      "application/msword",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ];
-    if (!allowed.includes(file.mimetype)) {
-      return cb(new Error("Only PDF, image, or Word files are allowed"));
+    const ext = path.extname(String(file.originalname || "")).toLowerCase();
+    if (!MATERIAL_FILE_TYPES[ext]?.includes(file.mimetype)) {
+      const error = new Error("Unsupported material file type");
+      error.code = "INVALID_FILE_TYPE";
+      return cb(error);
     }
     cb(null, true);
   },
@@ -54,12 +63,15 @@ function removeLocalFile(fileUrl) {
 
 async function uploadToStorage(file) {
   const bucket = process.env.SUPABASE_MATERIAL_BUCKET || "course-materials";
-  const ext = path.extname(file.originalname) || ".pdf";
-  const base = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9._-]+/g, "-");
+  const ext = path.extname(String(file.originalname || "")).toLowerCase();
+  const base = path.basename(String(file.originalname || ""), ext)
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120) || "material";
   const storagePath = `materials/${Date.now()}-${Math.round(Math.random() * 1e9)}-${base}${ext}`;
   const buffer = fs.readFileSync(file.path);
 
-  await supabase.storage.createBucket(bucket, { public: true }).catch((err) => {
+  await supabase.storage.createBucket(bucket, { public: false }).catch((err) => {
     const message = String(err?.message || "").toLowerCase();
     if (!message.includes("already exists")) throw err;
   });
@@ -72,8 +84,31 @@ async function uploadToStorage(file) {
     });
   if (error) throw error;
 
-  const { data } = supabase.storage.from(bucket).getPublicUrl(storagePath);
-  return { bucket, storagePath, fileUrl: data?.publicUrl || "" };
+  return { bucket, storagePath };
+}
+
+async function fileUrlFor(material) {
+  if (!material.storage_bucket || !material.storage_path) return legacyLocalFileUrl(material.file_url);
+
+  const { data, error } = await supabase.storage
+    .from(material.storage_bucket)
+    .createSignedUrl(material.storage_path, SIGNED_URL_EXPIRES_IN);
+  if (error || !data?.signedUrl) {
+    const signedUrlError = new Error("Material file not found");
+    signedUrlError.status = 404;
+    throw signedUrlError;
+  }
+  return data.signedUrl;
+}
+
+function legacyLocalFileUrl(fileUrl) {
+  const raw = String(fileUrl || "");
+  if (raw.startsWith("uploads/materials/")) return raw;
+  try {
+    return new URL(raw).pathname.startsWith("/uploads/materials/") ? raw : "";
+  } catch {
+    return "";
+  }
 }
 
 async function deleteStorageObject(bucket, storagePath) {
@@ -98,14 +133,14 @@ router.get("/all", onlyAdmin, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("course_materials")
-      .select("id,title,file_url,file_name,mime_type,course_id,order,created_at,courses(title)")
+      .select("id,title,file_url,file_name,mime_type,course_id,storage_bucket,storage_path,order,created_at,courses(title)")
       .order("order", { ascending: true })
       .order("created_at", { ascending: false });
     if (error) throw error;
-    res.json((data || []).map((row) => ({
+    const materials = await Promise.all((data || []).map(async (row) => ({
       id: row.id,
       title: row.title,
-      fileUrl: row.file_url,
+      fileUrl: await fileUrlFor(row),
       fileName: row.file_name,
       mimeType: row.mime_type,
       courseId: row.course_id,
@@ -113,8 +148,10 @@ router.get("/all", onlyAdmin, async (req, res) => {
       order: row.order,
       createdAt: row.created_at,
     })));
+    res.json(materials);
   } catch (err) {
     console.error("List materials error:", err);
+    if (err.status === 404) return res.status(404).json({ error: "Material file not found" });
     res.status(500).json({ error: "Failed to list materials" });
   }
 });
@@ -130,7 +167,6 @@ router.post("/upload", onlyAdmin, upload.single("file"), async (req, res) => {
     let storagePath = null;
     try {
       const uploaded = await uploadToStorage(req.file);
-      fileUrl = uploaded.fileUrl;
       storageBucket = uploaded.bucket;
       storagePath = uploaded.storagePath;
       removeLocalFile(`uploads/materials/${req.file.filename}`);
@@ -153,7 +189,7 @@ router.post("/upload", onlyAdmin, upload.single("file"), async (req, res) => {
         storage_path: storagePath,
         order: order ? Number(order) : 0,
       })
-      .select("id,title,file_url,file_name,mime_type,course_id,order,created_at")
+      .select("id,title,file_url,file_name,mime_type,course_id,storage_bucket,storage_path,order,created_at")
       .single();
     if (error) throw error;
     await supabase.from("notifications").insert({
@@ -166,7 +202,10 @@ router.post("/upload", onlyAdmin, upload.single("file"), async (req, res) => {
       if (notificationError) console.error("Material notification error:", notificationError.message);
     });
 
-    res.json({ success: true, material: data });
+    res.json({
+      success: true,
+      material: { ...data, file_url: await fileUrlFor(data) },
+    });
   } catch (err) {
     if (req.file) removeLocalFile(`uploads/materials/${req.file.filename}`);
     console.error("Upload material error:", err);
@@ -204,30 +243,33 @@ router.delete("/:id", onlyAdmin, async (req, res) => {
 
 router.get("/student/:studentId", requireSelfOrAdmin(), async (req, res) => {
   try {
-    const courseIds = await activeCourseIdsForStudent(req.params.studentId);
+    const studentId = req.user?.type === "user" ? req.user._id : req.params.studentId;
+    const courseIds = await activeCourseIdsForStudent(studentId);
     const allowed = ["course_id.is.null"];
     if (courseIds.length) allowed.push(`course_id.in.(${courseIds.join(",")})`);
 
     const { data, error } = await supabase
       .from("course_materials")
-      .select("id,title,file_url,file_name,mime_type,course_id,order,created_at,courses(title)")
+      .select("id,title,file_url,file_name,mime_type,course_id,storage_bucket,storage_path,order,created_at,courses(title)")
       .or(allowed.join(","))
       .order("order", { ascending: true })
       .order("created_at", { ascending: false });
     if (error) throw error;
 
-    res.json((data || []).map((row) => ({
+    const materials = await Promise.all((data || []).map(async (row) => ({
       id: row.id,
       title: row.title,
-      fileUrl: row.file_url,
+      fileUrl: await fileUrlFor(row),
       fileName: row.file_name,
       mimeType: row.mime_type,
       courseId: row.course_id,
       courseTitle: row.courses?.title || "",
       createdAt: row.created_at,
     })));
+    res.json(materials);
   } catch (err) {
     console.error("Student materials error:", err);
+    if (err.status === 404) return res.status(404).json({ error: "Material file not found" });
     res.status(500).json({ error: "Failed to load materials" });
   }
 });

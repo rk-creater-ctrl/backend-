@@ -9,9 +9,9 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 function courseValues(body) {
   const title = String(body.title || "").trim();
   const price = body.isPaid ? Number(body.price) : 0;
-  if (!title) throw Object.assign(new Error("Course title is required"), { status: 400 });
+  if (!title) throw Object.assign(new Error("Course title is required"), { status: 400, expose: true });
   if (!Number.isFinite(price) || price < 0) {
-    throw Object.assign(new Error("Course price must be a non-negative number"), { status: 400 });
+    throw Object.assign(new Error("Course price must be a non-negative number"), { status: 400, expose: true });
   }
   return {
     title,
@@ -28,7 +28,7 @@ function courseValues(body) {
 const validId = (id) => UUID_PATTERN.test(String(id || ""));
 
 // create course
-router.post("/create", onlyAdmin, async (req, res) => {
+router.post("/create", onlyAdmin, async (req, res, next) => {
   try {
     const { data, error } = await supabase
       .from("courses")
@@ -56,15 +56,15 @@ router.post("/create", onlyAdmin, async (req, res) => {
       updatedAt: data.updated_at,
     });
   } catch (err) {
-    console.error(err);
-    res.status(err.status || 500).send(err.message || "Error creating course");
+    if (err.status === 400 && err.expose) return res.status(400).json({ message: err.message });
+    return next(err);
   }
 });
 
 // update course
-router.put("/:id", onlyAdmin, async (req, res) => {
+router.put("/:id", onlyAdmin, async (req, res, next) => {
   try {
-    if (!validId(req.params.id)) return res.status(400).send("Invalid course ID");
+    if (!validId(req.params.id)) return res.status(400).json({ message: "Invalid course ID" });
 
     const { data, error } = await supabase
       .from("courses")
@@ -76,7 +76,7 @@ router.put("/:id", onlyAdmin, async (req, res) => {
       .maybeSingle();
 
     if (error) throw error;
-    if (!data) return res.status(404).send("Course not found");
+    if (!data) return res.status(404).json({ message: "Course not found" });
 
     res.json({
       _id: data.id,
@@ -94,13 +94,13 @@ router.put("/:id", onlyAdmin, async (req, res) => {
       updatedAt: data.updated_at,
     });
   } catch (err) {
-    console.error(err);
-    res.status(err.status || 500).send(err.message || "Error updating course");
+    if (err.status === 400 && err.expose) return res.status(400).json({ message: err.message });
+    return next(err);
   }
 });
 
 // list courses
-router.get("/list", async (req, res) => {
+router.get("/list", async (req, res, next) => {
   try {
     const { data, error } = await supabase
       .from("courses")
@@ -130,15 +130,14 @@ router.get("/list", async (req, res) => {
 
     res.json(mapped);
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Error fetching courses");
+    return next(err);
   }
 });
 
 // get single course
-router.get("/:id", async (req, res) => {
+router.get("/:id", async (req, res, next) => {
   try {
-    if (!validId(req.params.id)) return res.status(400).send("Invalid course ID");
+    if (!validId(req.params.id)) return res.status(400).json({ message: "Invalid course ID" });
     const { data, error } = await supabase
       .from("courses")
       .select(
@@ -148,7 +147,7 @@ router.get("/:id", async (req, res) => {
       .maybeSingle();
 
     if (error) throw error;
-    if (!data) return res.status(404).send("Course not found");
+    if (!data) return res.status(404).json({ message: "Course not found" });
 
     res.json({
       _id: data.id,
@@ -166,14 +165,13 @@ router.get("/:id", async (req, res) => {
       updatedAt: data.updated_at,
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Error fetching course");
+    return next(err);
   }
 });
 
-router.delete("/:id", onlyAdmin, async (req, res) => {
+router.delete("/:id", onlyAdmin, async (req, res, next) => {
   try {
-    if (!validId(req.params.id)) return res.status(400).send("Invalid course ID");
+    if (!validId(req.params.id)) return res.status(400).json({ message: "Invalid course ID" });
     const { data, error } = await supabase
       .from("courses")
       .delete()
@@ -187,8 +185,7 @@ router.delete("/:id", onlyAdmin, async (req, res) => {
       alreadyDeleted: !data,
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Error deleting course");
+    return next(err);
   }
 });
 

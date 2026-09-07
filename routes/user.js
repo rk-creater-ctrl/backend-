@@ -29,6 +29,7 @@ async function fetchUserById(userId) {
   if (!UUID_PATTERN.test(String(userId || ""))) {
     const err = new Error("Invalid user ID");
     err.status = 400;
+    err.expose = true;
     throw err;
   }
   const { data, error } = await supabase
@@ -89,6 +90,7 @@ async function assertUsernameAvailable(username, userId, adminId) {
   if (userTaken || adminTaken) {
     const err = new Error("Username already exists");
     err.status = 400;
+    err.expose = true;
     throw err;
   }
 }
@@ -177,7 +179,8 @@ router.post("/", async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    res.status(err.status || 500).send(err.message || "Error creating user");
+    if (err.status === 400 && err.expose) return res.status(400).json({ message: err.message });
+    res.status(500).json({ message: "Error creating user" });
   }
 });
 
@@ -247,7 +250,8 @@ router.put("/:id", async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    res.status(err.status || 500).send(err.message || "Error updating user");
+    if (err.status === 400 && err.expose) return res.status(400).json({ message: err.message });
+    res.status(500).json({ message: "Error updating user" });
   }
 });
 
@@ -352,7 +356,8 @@ router.patch("/:id/role", async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    res.status(err.status || 500).send(err.message || "Error updating role");
+    if (err.status === 400 && err.expose) return res.status(400).json({ message: err.message });
+    res.status(500).json({ message: "Error updating role" });
   }
 });
 
@@ -392,7 +397,8 @@ router.patch("/:id/status", async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    res.status(err.status || 500).send(err.message || "Error updating status");
+    if (err.status === 400 && err.expose) return res.status(400).json({ message: err.message });
+    res.status(500).json({ message: "Error updating status" });
   }
 });
 
@@ -435,7 +441,8 @@ router.delete("/:id", async (req, res) => {
     res.send("Deleted");
   } catch (err) {
     console.error(err);
-    res.status(err.status || 500).send(err.message || "Error deleting user");
+    if (err.status === 400 && err.expose) return res.status(400).json({ message: err.message });
+    res.status(500).json({ message: "Error deleting user" });
   }
 });
 

@@ -2,38 +2,51 @@ const jwt   = require("jsonwebtoken");
 
 const { supabase } = require("../supabaseClient");
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_key";
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_ALGORITHM = "HS256";
 
 
 function getAdminLevel(admin) {
   return admin?.level || "super_admin";
 }
 
+function getAuthenticatedUserId(req) {
+  const userId = req?.user?._id;
+  return typeof userId === "string" && userId.trim() ? userId : null;
+}
+
 // attach req.user if JWT exists (for both user and admin)
 function attachUser(req, res, next) {
   const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ")
-    ? authHeader.slice(7)
-    : null;
-
-  if (!token) {
+  if (!authHeader) {
     req.user = null;
     return next();
   }
 
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  if (!token) {
+    return res.status(401).json({ message: "Invalid or expired token" });
+  }
+
   try {
-    const payload = jwt.verify(token, JWT_SECRET); // { _id, type, role? }
+    const payload = jwt.verify(token, JWT_SECRET, { algorithms: [JWT_ALGORITHM] });
+    if (!payload?._id || !["user", "admin"].includes(payload.type)) {
+      throw new Error("Invalid token payload");
+    }
     req.user = payload;
   } catch {
-    req.user = null;
+    return res.status(401).json({ message: "Invalid or expired token" });
   }
   next();
 }
 
 // admin‑only guard (type: "admin" and exists in admins collection)
 async function onlyAdmin(req, res, next) {
-  if (!req.user || req.user.type !== "admin") {
-    return res.status(403).send("Admin only");
+  if (!req.user) {
+    return res.status(401).json({ message: "Login required" });
+  }
+  if (req.user.type !== "admin") {
+    return res.status(403).json({ message: "Admin only" });
   }
 
   const { data: admin, error } = await supabase
@@ -43,7 +56,7 @@ async function onlyAdmin(req, res, next) {
     .single();
 
   if (error || !admin) {
-    return res.status(403).send("Admin not found");
+    return res.status(403).json({ message: "Admin not found" });
   }
 
   // Normalize to match prior code shape
@@ -71,17 +84,25 @@ function onlySuperAdmin(req, res, next) {
 
 function requireUser(req, res, next) {
   if (!req.user || req.user.type !== "user") {
-    return res.status(401).send("Login required");
+    return res.status(401).json({ message: "Login required" });
   }
   next();
 }
 
 function requireSelfOrAdmin(paramName = "studentId") {
   return (req, res, next) => {
-    const targetId = req.params[paramName] || req.body?.[paramName];
-    const isSelf = req.user?.type === "user" && String(req.user._id) === String(targetId);
+    if (!req.user) {
+      return res.status(401).json({ message: "Login required" });
+    }
+    const authenticatedUserId = getAuthenticatedUserId(req);
+    const requestedTargetId = req.params[paramName] ?? req.body?.[paramName];
+    const targetId = requestedTargetId ?? authenticatedUserId;
+    const isSelf =
+      req.user?.type === "user" &&
+      authenticatedUserId !== null &&
+      String(authenticatedUserId) === String(targetId);
     if (!isSelf && req.user?.type !== "admin") {
-      return res.status(403).send("Access denied");
+      return res.status(403).json({ message: "Access denied" });
     }
     next();
   };
@@ -94,4 +115,5 @@ module.exports = {
   requireUser,
   requireSelfOrAdmin,
   getAdminLevel,
+  getAuthenticatedUserId,
 };
