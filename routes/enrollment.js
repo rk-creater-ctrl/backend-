@@ -215,15 +215,21 @@ router.post("/", requireSelfOrAdmin(), async (req, res) => {
       .single();
 
     if (eErr && isMissingColumnError(eErr)) {
-      console.warn("Enrollment insert used legacy fallback:", eErr.message);
+      // Older Supabase schemas keep the registration values only in
+      // offline_details. Do not retry with any optional address columns.
+      console.warn("Enrollment insert used core-schema fallback:", eErr.message);
       const legacyPayload = { ...insertPayload };
       delete legacyPayload.student_address;
       delete legacyPayload.aadhar_number;
       delete legacyPayload.mobile_number;
+      delete legacyPayload.offline_address;
+      delete legacyPayload.offline_teacher_name;
+      delete legacyPayload.offline_phone;
+      delete legacyPayload.offline_message;
       const legacyResult = await supabase
         .from("enrollments")
         .insert(legacyPayload)
-        .select("id,student_id,course_id,mode,payment_type,payment_status,status,amount,offline_details,created_at")
+        .select(safeEnrollmentSelect)
         .single();
       enrollment = legacyResult.data;
       eErr = legacyResult.error;
