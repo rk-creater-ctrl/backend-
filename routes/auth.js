@@ -449,7 +449,9 @@ router.post("/admin/login", async (req, res) => {
 
     const { data: adminRow, error } = await supabase
       .from('admins')
-      .select('id, full_name, username, password_hash, level, created_from_user, created_by')
+      // Login must work with the original admins table too.  The two
+      // relationship columns below are optional and are not needed to sign in.
+      .select('id, full_name, username, password_hash, level')
       .eq('username', username)
       .single();
 
@@ -464,8 +466,6 @@ router.post("/admin/login", async (req, res) => {
       username: adminRow.username,
       passwordHash: adminRow.password_hash,
       level: adminRow.level,
-      createdFromUser: adminRow.created_from_user,
-      createdBy: adminRow.created_by,
     };
 
     res.json({

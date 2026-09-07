@@ -240,7 +240,15 @@ router.post("/", requireSelfOrAdmin(), async (req, res) => {
     });
     emitEnrollmentChange(req, "created", { _id: enrollment.id });
   } catch (e) {
-    console.error("Enrollment creation error:", { name: e?.name, code: e?.code });
+    // Keep the client response generic, but retain the database reason in the
+    // server log so a local/Render deployment can be diagnosed safely.
+    console.error("Enrollment creation error:", {
+      name: e?.name,
+      code: e?.code,
+      message: e?.message,
+      details: e?.details,
+      hint: e?.hint,
+    });
     res.status(500).json({ message: "Failed to create enrollment request" });
   }
 });
